@@ -55,13 +55,8 @@ jobs:
           Get-ChildItem "input/*.cia" | ForEach-Object {
             $oldName = $_.BaseName
             Write-Host "Patching: $($_.Name)"
-            
-            # Using a Here-String to ensure 'P' + NewLine is sent correctly
-            # This mimics someone pressing 'P' and then 'Enter'
-            "P`n" | .\agb_edit.exe "$($_.FullName)"
-            
-            # Brief pause to let the tool finish file-handling
-            Start-Sleep -Seconds 2
+            # Run the patch
+            Write-Output "P" | .\agb_edit.exe "$($_.FullName)"
             
             # Rename and move result
             if (Test-Path "$($_.FullName)") {
