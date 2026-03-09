@@ -112,7 +112,7 @@ jobs:
             Write-Host "--- Step 2: Applying sleep patch ---"
             $psi2 = New-Object System.Diagnostics.ProcessStartInfo
             $psi2.FileName               = $sleepTool
-            $psi2.Arguments              = "--input-file-path `"$safeDump`" --output-file-path `"$safePatched`" --sleep-combo L+R+Select --no-hard-reset"
+            $psi2.Arguments = "`"$safeDump`" `"$safePatched`" --sleep-combo L+R+Select --no-hard-reset"
             $psi2.WorkingDirectory       = $workDir
             $psi2.RedirectStandardOutput = $true
             $psi2.RedirectStandardError  = $true
