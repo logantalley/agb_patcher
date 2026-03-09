@@ -52,16 +52,30 @@ jobs:
       - name: Process CIAs
         shell: pwsh
         run: |
+          $wshell = New-Object -ComObject wscript.shell
+          
           Get-ChildItem "input/*.cia" | ForEach-Object {
             $oldName = $_.BaseName
             Write-Host "Patching: $($_.Name)"
-            # Run the patch
-            Write-Output "P" | .\agb_edit.exe "$($_.FullName)"
             
-            # Rename and move result
-            if (Test-Path "$($_.FullName)") {
-                Move-Item "$($_.FullName)" "output/$($oldName)-patched.cia" -Force
-            }
+            # 1. Start the process asynchronously so it doesn't block the shell
+            $process = Start-Process -FilePath ".\agb_edit.exe" -ArgumentList "`"$($_.FullName)`"" -PassThru
+            
+            # 2. Wait for it to read the ROM header and display the prompt
+            Start-Sleep -Seconds 3
+            
+            # 3. Focus the hidden console window using its Process ID
+            $wshell.AppActivate($process.Id)
+            Start-Sleep -Milliseconds 500
+            
+            # 4. Inject 'p' directly into the keyboard buffer (lowercase is safer)
+            $wshell.SendKeys("p")
+            
+            # 5. Wait for it to finish unpacking, patching, and repacking the CIA
+            $process.WaitForExit()
+            
+            # 6. Rename and move the result
+            Move-Item "$($_.FullName)" "output/$($oldName)-patched.cia" -Force
           }
 
       - name: Upload Patched Files
