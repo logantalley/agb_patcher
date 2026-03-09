@@ -57,11 +57,8 @@ jobs:
             $oldName = $inputFile.BaseName
             Write-Host "Patching: $($inputFile.Name)"
 
-            # Snapshot what .cia files exist BEFORE running, so we can detect the new output
             $before = Get-ChildItem "input/*.cia" | Select-Object -ExpandProperty FullName
 
-            # Use ProcessStartInfo to pipe 'p' directly into stdin.
-            # No window activation needed — agb_edit reads from stdin like any C program.
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = ".\agb_edit.exe"
             $psi.Arguments = "`"$($inputFile.FullName)`""
@@ -71,31 +68,34 @@ jobs:
             $psi.UseShellExecute = $false
 
             $process = [System.Diagnostics.Process]::Start($psi)
+
+            # Read stdout and stderr asynchronously to prevent buffer deadlock
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+
             $process.StandardInput.WriteLine("p")
             $process.StandardInput.Close()
 
-            # Capture output for logging
-            $stdout = $process.StandardOutput.ReadToEnd()
-            $stderr = $process.StandardError.ReadToEnd()
             $process.WaitForExit()
+
+            $stdout = $stdoutTask.Result
+            $stderr = $stderrTask.Result
 
             Write-Host "Exit code: $($process.ExitCode)"
             Write-Host "=== agb_edit output ==="
             Write-Host $stdout
             if ($stderr) { Write-Host "STDERR: $stderr" }
 
-            # Detect whatever new .cia appeared — works regardless of the suffix agb_edit uses.
-            # Also logs the detected filename so you can confirm/hardcode it after the first run.
             $after = Get-ChildItem "input/*.cia" | Select-Object -ExpandProperty FullName
             $newFile = $after | Where-Object { $before -notcontains $_ }
 
             if ($newFile) {
               $detectedName = [System.IO.Path]::GetFileNameWithoutExtension($newFile)
-              Write-Host "Detected output filename: $detectedName"
+              Want-Host "Detected output filename: $detectedName"
               Move-Item $newFile "output/$($oldName)-patched.cia" -Force
               Write-Host "Moved to: output/$($oldName)-patched.cia"
             } else {
-              Write-Error "No new .cia found after patching $($inputFile.Name) — agb_edit may have failed. Check output above."
+              Write-Error "No new .cia found after patching $($inputFile.Name) — check output above."
               exit 1
             }
           }
