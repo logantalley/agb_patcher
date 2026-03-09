@@ -1,4 +1,4 @@
-name: GBA Batch Patcher (agb_edit Fixed)
+name: GBA Batch Patcher (agb_edit Final)
 on: 
   workflow_dispatch:
     inputs:
@@ -16,16 +16,19 @@ jobs:
       - name: Download and Setup agb_edit
         shell: pwsh
         run: |
+          # 1. Download release
           $url = "https://github.com/joemck/agb_edit/releases/download/v0.2.0a/agb_edit_020a.zip"
           Invoke-WebRequest -Uri $url -OutFile "agb_edit.zip"
-          Expand-Archive -Path "agb_edit.zip" -DestinationPath "."
           
-          # FIX: agb_edit looks for tools in a 'progfiles' subdirectory
-          if (!(Test-Path "progfiles")) { mkdir progfiles }
-          Move-Item "3dstool.exe", "makerom.exe", "ctrtool.exe" -Destination "progfiles\" -ErrorAction SilentlyContinue
-          
+          # 2. Extract and create the structure the tool expects
+          Expand-Archive -Path "agb_edit.zip" -DestinationPath "temp_setup"
+          mkdir progfiles -Force
           mkdir input -Force
           mkdir output -Force
+          
+          # 3. Move agb_edit.exe to root, others to progfiles
+          Move-Item "temp_setup\agb_edit_v0.2.0a\agb_edit.exe" ".\"
+          Move-Item "temp_setup\agb_edit_v0.2.0a\*" "progfiles\" -ErrorAction SilentlyContinue
 
       - name: Fetch Remote CIA (If URL provided)
         if: "${{ github.event.inputs.cia_url != '' }}"
@@ -37,16 +40,18 @@ jobs:
         shell: pwsh
         run: |
           Get-ChildItem "input/*.cia" | ForEach-Object {
+            $oldName = $_.BaseName
             Write-Host "Patching: $($_.Name)"
-            # Use 'echo P' to automate the "P" preset (Lid Sleep + Gamma)
+            
+            # Pipe 'P' for: Lid Sleep, Gamma 1.54, Ghosting & Vignette Removal
             echo "P" | .\agb_edit.exe "$($_.FullName)"
             
-            # The tool modifies the file in place; move result to output
-            Move-Item "$($_.FullName)" "output/"
+            # Move and rename to include -patched suffix
+            Move-Item "$($_.FullName)" "output/$($oldName)-patched.cia"
           }
 
       - name: Upload Patched Files
         uses: actions/upload-artifact@v4
         with:
-          name: Patched-CIAs
+          name: Patched-GBA-CIAs
           path: output/
