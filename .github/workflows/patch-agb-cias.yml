@@ -1,4 +1,4 @@
-name: AGB Patcher
+name: GBA Batch Patcher (agb_edit Final Fix)
 on:
   workflow_dispatch:
     inputs:
@@ -48,8 +48,15 @@ jobs:
           $urls = "${{ github.event.inputs.cia_urls }}" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
           $i = 1
           foreach ($url in $urls) {
-            Write-Host "Downloading ($i): $url"
-            Invoke-WebRequest -Uri $url -OutFile "input/remote_game_$i.cia"
+            # Extract filename from the URL, decode any percent-encoding
+            $encoded  = $url.Split('/')[-1].Split('?')[0]
+            $filename = [System.Uri]::UnescapeDataString($encoded)
+            # Fall back to a numbered name if the URL doesn't end in .cia
+            if ($filename -notmatch '\.cia$') {
+              $filename = "remote_game_$i.cia"
+            }
+            Write-Host "Downloading: $url -> input/$filename"
+            Invoke-WebRequest -Uri $url -OutFile "input/$filename"
             $i++
           }
 
@@ -146,73 +153,77 @@ jobs:
           name: Patched-GBA-CIAs
           path: cias
 
-      - name: Generate QR code page
+      - name: Install Python dependencies
+        run: pip install "qrcode[pil]" pillow --quiet
+
+      - name: Generate QR codes and index.html
+        env:
+          REPO: ${{ github.repository }}
+          TAG:  ${{ needs.patch.outputs.tag }}
         run: |
-          pip install qrcode[pil] pillow --quiet
-
-          REPO="${{ github.repository }}"
-          TAG="${{ needs.patch.outputs.tag }}"
-          OWNER=$(echo "$REPO" | cut -d'/' -f1)
-          REPONAME=$(echo "$REPO" | cut -d'/' -f2)
-
           mkdir -p qr
+          python3 - << 'PYEOF'
+          import os, urllib.parse, qrcode
 
-          # Build each QR code image and collect HTML cards
-          CARDS=""
-          for cia in cias/*.cia; do
-            FILENAME=$(basename "$cia")
-            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('''$FILENAME'''))")
-            URL="https://github.com/${REPO}/releases/download/${TAG}/${ENCODED}"
-            SAFE=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
-            QRFILE="qr/${SAFE}.png"
+          repo = os.environ["REPO"]
+          tag  = os.environ["TAG"]
 
-            python3 - <<PYEOF
-          import qrcode
-          img = qrcode.make("$URL")
-          img.save("$QRFILE")
-          PYEOF
+          cia_dir = "cias"
+          cards   = []
 
-            LABEL=$(echo "$FILENAME" | sed 's/-patched\.cia$//')
-            CARDS="${CARDS}
-            <div class=\"card\">
-              <img src=\"qr/${SAFE}.png\" alt=\"QR for ${LABEL}\">
-              <p>${LABEL}</p>
-              <a href=\"${URL}\">Direct link</a>
-            </div>"
-          done
+          for filename in sorted(os.listdir(cia_dir)):
+              if not filename.endswith(".cia"):
+                  continue
+              encoded  = urllib.parse.quote(filename)
+              url      = f"https://github.com/{repo}/releases/download/{tag}/{encoded}"
+              safe     = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
+              qr_path  = f"qr/{safe}.png"
+              label    = filename.replace("-patched.cia", "")
 
-          cat > index.html << HTML
-          <!DOCTYPE html>
+              img = qrcode.make(url)
+              img.save(qr_path)
+              print(f"QR saved: {qr_path}")
+
+              cards.append(f"""
+              <div class="card">
+                <img src="{qr_path}" alt="QR for {label}">
+                <p>{label}</p>
+                <a href="{url}">Direct link</a>
+              </div>""")
+
+          cards_html = "\n".join(cards)
+
+          html = f"""<!DOCTYPE html>
           <html lang="en">
           <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Patched GBA CIAs — ${TAG}</title>
+            <title>Patched GBA CIAs — {tag}</title>
             <style>
-              body {
+              body {{
                 font-family: sans-serif;
                 background: #1a1a2e;
                 color: #eee;
                 text-align: center;
                 padding: 2rem;
                 margin: 0;
-              }
-              h1 { color: #e94560; margin-bottom: 0.25rem; }
-              .subtitle { color: #aaa; font-size: 0.9rem; margin-bottom: 2rem; }
-              .grid {
+              }}
+              h1 {{ color: #e94560; margin-bottom: 0.25rem; }}
+              .subtitle {{ color: #aaa; font-size: 0.9rem; margin-bottom: 2rem; }}
+              .grid {{
                 display: flex;
                 flex-wrap: wrap;
                 justify-content: center;
                 gap: 2rem;
-              }
-              .card {
+              }}
+              .card {{
                 background: #16213e;
                 border: 1px solid #e9456044;
                 border-radius: 12px;
                 padding: 1.5rem;
                 width: 220px;
-              }
-              .card img {
+              }}
+              .card img {{
                 width: 180px;
                 height: 180px;
                 border-radius: 8px;
@@ -220,40 +231,47 @@ jobs:
                 padding: 6px;
                 display: block;
                 margin: 0 auto 1rem;
-              }
-              .card p {
+              }}
+              .card p {{
                 font-size: 0.85rem;
                 word-break: break-word;
                 margin: 0 0 0.75rem;
                 color: #ccc;
-              }
-              .card a {
+              }}
+              .card a {{
                 font-size: 0.8rem;
                 color: #e94560;
                 text-decoration: none;
-              }
-              .card a:hover { text-decoration: underline; }
-              footer { margin-top: 3rem; font-size: 0.75rem; color: #555; }
+              }}
+              .card a:hover {{ text-decoration: underline; }}
+              footer {{ margin-top: 3rem; font-size: 0.75rem; color: #555; }}
+              footer a {{ color: #555; }}
             </style>
           </head>
           <body>
-            <h1>Patched GBA CIAs</h1>
-            <p class="subtitle">Release: ${TAG} &nbsp;|&nbsp; Scan with FBI on your 3DS</p>
+            <h1>Patched CIAs</h1>
+            <p class="subtitle">Release: {tag} &nbsp;|&nbsp; Scan with FBI on your 3DS</p>
             <div class="grid">
-              ${CARDS}
+              {cards_html}
             </div>
-            <footer>Generated by GBA Batch Patcher &bull; <a href="https://github.com/${REPO}/releases/tag/${TAG}" style="color:#555">View Release</a></footer>
+            <footer>
+              Generated by AGB Batch Patcher &bull;
+              <a href="https://github.com/{repo}/releases/tag/{tag}">View Release</a>
+            </footer>
           </body>
-          </html>
-          HTML
+          </html>"""
 
-          echo "Generated index.html"
-          ls -la qr/
+          with open("index.html", "w", encoding="utf-8") as f:
+              f.write(html)
+
+          print(f"index.html written — {len(cards)} card(s)")
+          PYEOF
 
       - name: Commit and push to gh-pages
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add index.html qr/
-          git commit -m "Update QR page for ${{ needs.patch.outputs.tag }}" || echo "Nothing to commit"
+          git status
+          git commit -m "Update QR page for ${{ needs.patch.outputs.tag }}"
           git push origin gh-pages
