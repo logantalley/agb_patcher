@@ -59,9 +59,14 @@ jobs:
       - name: Process CIAs
         shell: pwsh
         run: |
-          $agbEdit  = Resolve-Path "src/agb_edit/agb_edit.exe"
+          $agbEdit   = Resolve-Path "src/agb_edit/agb_edit.exe"
           $sleepTool = Resolve-Path "tools/gba-sleephack-patcher-tool.exe"
-          $workDir  = Split-Path $agbEdit
+          $workDir   = Split-Path $agbEdit
+          $progfiles = Join-Path $workDir "progfiles"
+          $ctrtool   = Join-Path $progfiles "ctrtool.exe"
+          $dstool    = Join-Path $progfiles "3dstool.exe"
+          $makerom   = Join-Path $progfiles "makerom.exe"
+          $origDir   = $env:GITHUB_WORKSPACE
 
           Get-ChildItem "input/*.cia" | ForEach-Object {
             $inputFile = $_.FullName
@@ -74,12 +79,12 @@ jobs:
             # --- Copy to safe ASCII filename to avoid Unicode issues ---
             $safeName    = "input_game"
             $safeInput   = Join-Path $workDir "$safeName.cia"
-            $safeDump    = Join-Path $workDir "$safeName.gba"          # agb_edit dumps ROM here
-            $safePatched = Join-Path $workDir "$safeName-slept.gba"    # sleep-patched ROM
+            $safeDump    = Join-Path $workDir "$safeName.gba"
+            $safePatched = Join-Path $workDir "$safeName-slept.gba"
             $safeOutput  = Join-Path $workDir "$safeName (edit-sleepbtns-lcdghost-filter).cia"
             Copy-Item $inputFile $safeInput -Force
 
-            # Helper to run agb_edit with a given stdin key and capture output
+            # Helper to run agb_edit with a given stdin key
             function Run-AgbEdit($key) {
               $psi = New-Object System.Diagnostics.ProcessStartInfo
               $psi.FileName               = $agbEdit
@@ -112,7 +117,7 @@ jobs:
             Write-Host "--- Step 2: Applying sleep patch ---"
             $psi2 = New-Object System.Diagnostics.ProcessStartInfo
             $psi2.FileName               = $sleepTool
-            $psi2.Arguments = "`"$safeDump`" `"$safePatched`" --sleep-combo L+R+Select --no-hard-reset"
+            $psi2.Arguments              = "`"$safeDump`" `"$safePatched`" --sleep-combo L+R+Select --no-hard-reset"
             $psi2.WorkingDirectory       = $workDir
             $psi2.RedirectStandardOutput = $true
             $psi2.RedirectStandardError  = $true
@@ -128,20 +133,12 @@ jobs:
             if (-not (Test-Path $safePatched)) { Write-Error "Patched ROM not found at: $safePatched"; exit 1 }
             Write-Host "Sleep patch applied: $safePatched"
 
-            # --- Step 3: Splice the patched ROM back into code.bin ---
-            # The CIA structure is: CIA -> CXI -> exefs -> code.bin
-            # code.bin = [GBA ROM bytes][AGB_FIRM footer]
-            # The ROM sits at offset 0, so we overwrite just those bytes in place.
+            # --- Step 3: Splice the patched ROM back into the CIA ---
             Write-Host "--- Step 3: Splicing patched ROM back into CIA ---"
 
             $tmpDir = Join-Path $workDir "UNPACKTMP"
             if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
             New-Item -ItemType Directory -Path $tmpDir | Out-Null
-
-            $progfiles = Join-Path $workDir "progfiles"
-            $ctrtool   = Join-Path $progfiles "ctrtool.exe"
-            $dstool    = Join-Path $progfiles "3dstool.exe"
-            $makerom   = Join-Path $progfiles "makerom.exe"
 
             # Unpack CIA contents
             & $ctrtool --contents "$tmpDir\file" "$safeInput"
@@ -192,21 +189,22 @@ jobs:
               --romfs  "$tmpDir\romfs.bin"
             if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -ctf cxi failed"; exit 1 }
 
-            # Reassemble CIA — enumerate all dumped content files
+            # Reassemble CIA using relative paths (makerom requires this)
             $contentFiles = Get-ChildItem "$tmpDir\file.*" | Sort-Object Name
             $makeromArgs  = @("-f", "cia")
             foreach ($cf in $contentFiles) {
-              # Parse file.XXXXXXXX.YYYYYYYY -> file number and index number
-              $parts    = $cf.Name -split '\.'
-              $fileNum  = [Convert]::ToInt32($parts[1], 16).ToString()
-              $indNum   = [Convert]::ToInt32($parts[2], 16).ToString()
-              $cxiPath  = if ($cf.Name -eq $mainCxi) { "$tmpDir\modified.cxi" } else { $cf.FullName }
+              $parts   = $cf.Name -split '\.'
+              $fileNum = [Convert]::ToInt32($parts[1], 16).ToString()
+              $indNum  = [Convert]::ToInt32($parts[2], 16).ToString()
+              $cxiPath = if ($cf.Name -eq $mainCxi) { "UNPACKTMP\modified.cxi" } else { "UNPACKTMP\$($cf.Name)" }
               $makeromArgs += @("-content", "${cxiPath}:${fileNum}:${indNum}")
             }
-            $makeromArgs += @("-o", $safeInput)   # overwrite safeInput with the rebuilt CIA
+            $makeromArgs += @("-o", "$safeName.cia")
             Write-Host "Running: makerom $makeromArgs"
+            Set-Location $workDir
             & $makerom @makeromArgs
             if ($LASTEXITCODE -ne 0) { Write-Error "makerom failed"; exit 1 }
+            Set-Location $origDir
 
             # Clean up temp dir
             Remove-Item $tmpDir -Recurse -Force
@@ -223,7 +221,7 @@ jobs:
             }
 
             # --- Move final result to output/ with original name restored ---
-            Move-Item $safeOutput "output/$oldName-patched.cia" -Force
+            Move-Item $safeOutput "$origDir\output\$oldName-patched.cia" -Force
             Remove-Item $safeInput   -Force -ErrorAction SilentlyContinue
             Remove-Item $safeDump    -Force -ErrorAction SilentlyContinue
             Remove-Item $safePatched -Force -ErrorAction SilentlyContinue
