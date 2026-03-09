@@ -1,5 +1,5 @@
 name: GBA Batch Patcher (agb_edit Final Fix)
-on: 
+on:
   workflow_dispatch:
     inputs:
       cia_url:
@@ -19,24 +19,24 @@ jobs:
           # 1. Download the correct zip
           $url = "https://github.com/joemck/agb_edit/releases/download/v0.2.0a/agb_edit_020a.zip"
           Invoke-WebRequest -Uri $url -OutFile "agb_edit.zip"
-          
+
           # 2. Extract
           Expand-Archive -Path "agb_edit.zip" -DestinationPath "temp_setup"
-          
+
           # 3. Create the target structure
           mkdir progfiles -Force
           mkdir input -Force
           mkdir output -Force
-          
+
           # 4. Find where the files actually are (handles any internal folder names)
           $sourceDir = (Get-ChildItem -Path "temp_setup" -Filter "agb_edit.exe" -Recurse).DirectoryName
-          
+
           # 5. Move agb_edit.exe to the ROOT
           Move-Item "$sourceDir\agb_edit.exe" ".\" -Force
-          
+
           # 6. Move the dependencies (3dstool, makerom, etc.) into \progfiles\
           Get-ChildItem -Path $sourceDir -Exclude "agb_edit.exe" | Move-Item -Destination "progfiles\" -Force
-          
+
           # Verify structure for the logs
           Write-Host "--- Root Directory ---"
           ls .
@@ -52,30 +52,52 @@ jobs:
       - name: Process CIAs
         shell: pwsh
         run: |
-          $wshell = New-Object -ComObject wscript.shell
-          
           Get-ChildItem "input/*.cia" | ForEach-Object {
-            $oldName = $_.BaseName
-            Write-Host "Patching: $($_.Name)"
-            
-            # 1. Start the process asynchronously so it doesn't block the shell
-            $process = Start-Process -FilePath ".\agb_edit.exe" -ArgumentList "`"$($_.FullName)`"" -PassThru
-            
-            # 2. Wait for it to read the ROM header and display the prompt
-            Start-Sleep -Seconds 3
-            
-            # 3. Focus the hidden console window using its Process ID
-            $wshell.AppActivate($process.Id)
-            Start-Sleep -Milliseconds 500
-            
-            # 4. Inject 'p' directly into the keyboard buffer (lowercase is safer)
-            $wshell.SendKeys("p")
-            
-            # 5. Wait for it to finish unpacking, patching, and repacking the CIA
+            $inputFile = $_
+            $oldName = $inputFile.BaseName
+            Write-Host "Patching: $($inputFile.Name)"
+
+            # Snapshot what .cia files exist BEFORE running, so we can detect the new output
+            $before = Get-ChildItem "input/*.cia" | Select-Object -ExpandProperty FullName
+
+            # Use ProcessStartInfo to pipe 'p' directly into stdin.
+            # No window activation needed — agb_edit reads from stdin like any C program.
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = ".\agb_edit.exe"
+            $psi.Arguments = "`"$($inputFile.FullName)`""
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+
+            $process = [System.Diagnostics.Process]::Start($psi)
+            $process.StandardInput.WriteLine("p")
+            $process.StandardInput.Close()
+
+            # Capture output for logging
+            $stdout = $process.StandardOutput.ReadToEnd()
+            $stderr = $process.StandardError.ReadToEnd()
             $process.WaitForExit()
-            
-            # 6. Rename and move the result
-            Move-Item "$($_.FullName)" "output/$($oldName)-patched.cia" -Force
+
+            Write-Host "Exit code: $($process.ExitCode)"
+            Write-Host "=== agb_edit output ==="
+            Write-Host $stdout
+            if ($stderr) { Write-Host "STDERR: $stderr" }
+
+            # Detect whatever new .cia appeared — works regardless of the suffix agb_edit uses.
+            # Also logs the detected filename so you can confirm/hardcode it after the first run.
+            $after = Get-ChildItem "input/*.cia" | Select-Object -ExpandProperty FullName
+            $newFile = $after | Where-Object { $before -notcontains $_ }
+
+            if ($newFile) {
+              $detectedName = [System.IO.Path]::GetFileNameWithoutExtension($newFile)
+              Write-Host "Detected output filename: $detectedName"
+              Move-Item $newFile "output/$($oldName)-patched.cia" -Force
+              Write-Host "Moved to: output/$($oldName)-patched.cia"
+            } else {
+              Write-Error "No new .cia found after patching $($inputFile.Name) — agb_edit may have failed. Check output above."
+              exit 1
+            }
           }
 
       - name: Upload Patched Files
