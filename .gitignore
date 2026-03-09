@@ -4,4 +4,4 @@
 work/
 output/
 # If you don't want to store your CIAs in Git history:
-input/*.cia
+#input/*.cia
