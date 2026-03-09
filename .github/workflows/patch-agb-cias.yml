@@ -48,13 +48,9 @@ jobs:
           $urls = "${{ github.event.inputs.cia_urls }}" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
           $i = 1
           foreach ($url in $urls) {
-            # Extract filename from the URL, decode any percent-encoding
             $encoded  = $url.Split('/')[-1].Split('?')[0]
             $filename = [System.Uri]::UnescapeDataString($encoded)
-            # Fall back to a numbered name if the URL doesn't end in .cia
-            if ($filename -notmatch '\.cia$') {
-              $filename = "remote_game_$i.cia"
-            }
+            if ($filename -notmatch '\.cia$') { $filename = "remote_game_$i.cia" }
             Write-Host "Downloading: $url -> input/$filename"
             Invoke-WebRequest -Uri $url -OutFile "input/$filename"
             $i++
@@ -63,56 +59,175 @@ jobs:
       - name: Process CIAs
         shell: pwsh
         run: |
-          $agbEdit = Resolve-Path "src/agb_edit/agb_edit.exe"
-          $workDir = Split-Path $agbEdit
+          $agbEdit  = Resolve-Path "src/agb_edit/agb_edit.exe"
+          $sleepTool = Resolve-Path "tools/gba-sleephack-patcher-tool.exe"
+          $workDir  = Split-Path $agbEdit
 
           Get-ChildItem "input/*.cia" | ForEach-Object {
             $inputFile = $_.FullName
             $oldName   = $_.BaseName
-            Write-Host "Patching: $($_.Name)"
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host "Processing: $($_.Name)"
+            Write-Host "========================================"
 
-            $safeName   = "input_game"
-            $safeInput  = Join-Path $workDir "$safeName.cia"
-            $safeOutput = Join-Path $workDir "$safeName (edit-sleepbtns-lcdghost-filter).cia"
+            # --- Copy to safe ASCII filename to avoid Unicode issues ---
+            $safeName    = "input_game"
+            $safeInput   = Join-Path $workDir "$safeName.cia"
+            $safeDump    = Join-Path $workDir "$safeName.gba"          # agb_edit dumps ROM here
+            $safePatched = Join-Path $workDir "$safeName-slept.gba"    # sleep-patched ROM
+            $safeOutput  = Join-Path $workDir "$safeName (edit-sleepbtns-lcdghost-filter).cia"
             Copy-Item $inputFile $safeInput -Force
 
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName               = $agbEdit
-            $psi.Arguments              = "`"$safeInput`""
-            $psi.WorkingDirectory       = $workDir
-            $psi.RedirectStandardInput  = $true
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError  = $true
-            $psi.UseShellExecute        = $false
+            # Helper to run agb_edit with a given stdin key and capture output
+            function Run-AgbEdit($key) {
+              $psi = New-Object System.Diagnostics.ProcessStartInfo
+              $psi.FileName               = $agbEdit
+              $psi.Arguments              = "`"$safeInput`""
+              $psi.WorkingDirectory       = $workDir
+              $psi.RedirectStandardInput  = $true
+              $psi.RedirectStandardOutput = $true
+              $psi.RedirectStandardError  = $true
+              $psi.UseShellExecute        = $false
+              $proc = [System.Diagnostics.Process]::Start($psi)
+              $outTask = $proc.StandardOutput.ReadToEndAsync()
+              $errTask = $proc.StandardError.ReadToEndAsync()
+              $proc.StandardInput.WriteLine($key)
+              $proc.StandardInput.Close()
+              $proc.WaitForExit()
+              Write-Host "=== agb_edit output (key='$key') ==="
+              Write-Host $outTask.Result
+              if ($errTask.Result) { Write-Host "STDERR: $($errTask.Result)" }
+              return $proc.ExitCode
+            }
 
-            $process = [System.Diagnostics.Process]::Start($psi)
+            # --- Step 1: Dump the GBA ROM out of the CIA ---
+            Write-Host "--- Step 1: Dumping GBA ROM ---"
+            $exitCode = Run-AgbEdit "d"
+            if ($exitCode -ne 0) { Write-Error "agb_edit ROM dump failed (exit $exitCode)"; exit 1 }
+            if (-not (Test-Path $safeDump)) { Write-Error "ROM dump not found at: $safeDump"; exit 1 }
+            Write-Host "ROM dumped: $safeDump ($(((Get-Item $safeDump).Length / 1MB).ToString('F2')) MB)"
 
-            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-            $stderrTask = $process.StandardError.ReadToEndAsync()
+            # --- Step 2: Apply sleep patch to the GBA ROM ---
+            Write-Host "--- Step 2: Applying sleep patch ---"
+            $psi2 = New-Object System.Diagnostics.ProcessStartInfo
+            $psi2.FileName               = $sleepTool
+            $psi2.Arguments              = "--input-file-path `"$safeDump`" --output-file-path `"$safePatched`" --sleep-combo L+R+Select --no-hard-reset"
+            $psi2.WorkingDirectory       = $workDir
+            $psi2.RedirectStandardOutput = $true
+            $psi2.RedirectStandardError  = $true
+            $psi2.UseShellExecute        = $false
+            $proc2 = [System.Diagnostics.Process]::Start($psi2)
+            $outTask2 = $proc2.StandardOutput.ReadToEndAsync()
+            $errTask2 = $proc2.StandardError.ReadToEndAsync()
+            $proc2.WaitForExit()
+            Write-Host "=== sleephack output ==="
+            Write-Host $outTask2.Result
+            if ($errTask2.Result) { Write-Host "STDERR: $($errTask2.Result)" }
+            if ($proc2.ExitCode -ne 0) { Write-Error "Sleep patch failed (exit $($proc2.ExitCode))"; exit 1 }
+            if (-not (Test-Path $safePatched)) { Write-Error "Patched ROM not found at: $safePatched"; exit 1 }
+            Write-Host "Sleep patch applied: $safePatched"
 
-            $process.StandardInput.WriteLine("p")
-            $process.StandardInput.Close()
+            # --- Step 3: Splice the patched ROM back into code.bin ---
+            # The CIA structure is: CIA -> CXI -> exefs -> code.bin
+            # code.bin = [GBA ROM bytes][AGB_FIRM footer]
+            # The ROM sits at offset 0, so we overwrite just those bytes in place.
+            Write-Host "--- Step 3: Splicing patched ROM back into CIA ---"
 
-            $process.WaitForExit()
+            $tmpDir = Join-Path $workDir "UNPACKTMP"
+            if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
+            New-Item -ItemType Directory -Path $tmpDir | Out-Null
 
-            $stdout = $stdoutTask.Result
-            $stderr = $stderrTask.Result
+            $progfiles = Join-Path $workDir "progfiles"
+            $ctrtool   = Join-Path $progfiles "ctrtool.exe"
+            $dstool    = Join-Path $progfiles "3dstool.exe"
+            $makerom   = Join-Path $progfiles "makerom.exe"
 
-            Write-Host "Exit code: $($process.ExitCode)"
-            Write-Host "=== agb_edit output ==="
-            Write-Host $stdout
-            if ($stderr) { Write-Host "STDERR: $stderr" }
+            # Unpack CIA contents
+            & $ctrtool --contents "$tmpDir\file" "$safeInput"
+            if ($LASTEXITCODE -ne 0) { Write-Error "ctrtool --contents failed"; exit 1 }
 
-            if (Test-Path $safeOutput) {
-              Move-Item $safeOutput "output/$oldName-patched.cia" -Force
-              Remove-Item $safeInput -Force -ErrorAction SilentlyContinue
-              Write-Host "Success: output/$oldName-patched.cia"
-            } else {
+            # Find the largest file (the main CXI)
+            $mainCxi = (Get-ChildItem $tmpDir | Sort-Object Length -Descending | Select-Object -First 1).Name
+
+            # Unpack CXI
+            & $dstool -xtf cxi "$tmpDir\$mainCxi" `
+              --header "$tmpDir\ncchheader.bin" `
+              --exh    "$tmpDir\exheader.bin"   `
+              --exefs  "$tmpDir\exefs.bin"       `
+              --romfs  "$tmpDir\romfs.bin"
+            if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -xtf cxi failed"; exit 1 }
+
+            # Unpack exefs
+            & $dstool -xtf exefs "$tmpDir\exefs.bin" `
+              --exefs-dir "$tmpDir\exefs"             `
+              --header    "$tmpDir\exefsheader.bin"
+            if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -xtf exefs failed"; exit 1 }
+
+            # Splice: overwrite the first N bytes of code.bin with the patched ROM
+            $codeBin     = "$tmpDir\exefs\code.bin"
+            $patchedRom  = [System.IO.File]::ReadAllBytes($safePatched)
+            $codeBinData = [System.IO.File]::ReadAllBytes($codeBin)
+            $romSize     = $patchedRom.Length
+            if ($romSize -gt $codeBinData.Length) {
+              Write-Error "Patched ROM ($romSize bytes) is larger than code.bin ($($codeBinData.Length) bytes)!"
+              exit 1
+            }
+            Write-Host "Splicing $romSize bytes of patched ROM into code.bin ($($codeBinData.Length) bytes total)"
+            [System.Array]::Copy($patchedRom, $codeBinData, $romSize)
+            [System.IO.File]::WriteAllBytes($codeBin, $codeBinData)
+            Write-Host "Splice complete"
+
+            # Repack exefs
+            & $dstool -ctf exefs "$tmpDir\newExefs.bin" `
+              --exefs-dir "$tmpDir\exefs"                `
+              --header    "$tmpDir\exefsheader.bin"
+            if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -ctf exefs failed"; exit 1 }
+
+            # Repack CXI
+            & $dstool -ctf cxi "$tmpDir\modified.cxi"  `
+              --header "$tmpDir\ncchheader.bin"          `
+              --exh    "$tmpDir\exheader.bin"            `
+              --exefs  "$tmpDir\newExefs.bin"            `
+              --romfs  "$tmpDir\romfs.bin"
+            if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -ctf cxi failed"; exit 1 }
+
+            # Reassemble CIA — enumerate all dumped content files
+            $contentFiles = Get-ChildItem "$tmpDir\file.*" | Sort-Object Name
+            $makeromArgs  = @("-f", "cia")
+            foreach ($cf in $contentFiles) {
+              # Parse file.XXXXXXXX.YYYYYYYY -> file number and index number
+              $parts    = $cf.Name -split '\.'
+              $fileNum  = [Convert]::ToInt32($parts[1], 16).ToString()
+              $indNum   = [Convert]::ToInt32($parts[2], 16).ToString()
+              $cxiPath  = if ($cf.Name -eq $mainCxi) { "$tmpDir\modified.cxi" } else { $cf.FullName }
+              $makeromArgs += @("-content", "${cxiPath}:${fileNum}:${indNum}")
+            }
+            $makeromArgs += @("-o", $safeInput)   # overwrite safeInput with the rebuilt CIA
+            Write-Host "Running: makerom $makeromArgs"
+            & $makerom @makeromArgs
+            if ($LASTEXITCODE -ne 0) { Write-Error "makerom failed"; exit 1 }
+
+            # Clean up temp dir
+            Remove-Item $tmpDir -Recurse -Force
+
+            # --- Step 4: Run agb_edit preset quick-fix (gamma + button combo) ---
+            Write-Host "--- Step 4: Applying agb_edit preset fix ---"
+            $exitCode = Run-AgbEdit "p"
+            if ($exitCode -ne 0) { Write-Error "agb_edit preset fix failed (exit $exitCode)"; exit 1 }
+            if (-not (Test-Path $safeOutput)) {
               Write-Error "Expected output not found: $safeOutput"
               Write-Host "Contents of workDir:"
               Get-ChildItem $workDir
               exit 1
             }
+
+            # --- Move final result to output/ with original name restored ---
+            Move-Item $safeOutput "output/$oldName-patched.cia" -Force
+            Remove-Item $safeInput   -Force -ErrorAction SilentlyContinue
+            Remove-Item $safeDump    -Force -ErrorAction SilentlyContinue
+            Remove-Item $safePatched -Force -ErrorAction SilentlyContinue
+            Write-Host "Done: output/$oldName-patched.cia"
           }
 
       - name: Generate release tag
@@ -249,13 +364,13 @@ jobs:
             </style>
           </head>
           <body>
-            <h1>Patched CIAs</h1>
+            <h1>Patched GBA CIAs</h1>
             <p class="subtitle">Release: {tag} &nbsp;|&nbsp; Scan with FBI on your 3DS</p>
             <div class="grid">
               {cards_html}
             </div>
             <footer>
-              Generated by AGB Batch Patcher &bull;
+              Generated by GBA Batch Patcher &bull;
               <a href="https://github.com/{repo}/releases/tag/{tag}">View Release</a>
             </footer>
           </body>
