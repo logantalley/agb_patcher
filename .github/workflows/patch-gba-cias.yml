@@ -1,0 +1,107 @@
+name: GBA Batch Patcher (agb_edit Final Fix)
+on:
+  workflow_dispatch:
+    inputs:
+      cia_url:
+        description: 'Direct link to .cia (Optional)'
+        required: false
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install MinGW (gcc)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+          update: false
+
+      - name: Build agb_edit from patched source
+        shell: msys2 {0}
+        run: |
+          cd src/agb_edit
+          gcc -Os -o agb_edit.exe src/main.c src/gbacia.c src/videolut.c src/console_ui.c
+          echo "--- Build output ---"
+          ls -la agb_edit.exe
+
+      - name: Setup directories
+        shell: pwsh
+        run: |
+          mkdir input  -Force
+          mkdir output -Force
+
+      - name: Fetch Remote CIA (If URL provided)
+        if: "${{ github.event.inputs.cia_url != '' }}"
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ github.event.inputs.cia_url }}" -OutFile "input/remote_game.cia"
+
+      - name: Process CIAs
+        shell: pwsh
+        run: |
+          $agbEdit   = Resolve-Path "src/agb_edit/agb_edit.exe"
+          $workDir   = Split-Path $agbEdit
+
+          # agb_edit requires progfiles\ to sit next to the exe,
+          # so we run it from the exe's directory and pass absolute CIA paths.
+
+          Get-ChildItem "input/*.cia" | ForEach-Object {
+            $inputFile = $_.FullName
+            $oldName   = $_.BaseName
+            Write-Host "Patching: $($_.Name)"
+
+            # The preset quick-fix (P) always produces this exact suffix (confirmed from source):
+            #   <original name> (edit-sleepbtns-lcdghost-filter).cia
+            # Output lands next to the input file.
+            $expectedOutput = Join-Path (Split-Path $inputFile) "$oldName (edit-sleepbtns-lcdghost-filter).cia"
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName             = $agbEdit
+            $psi.Arguments            = "`"$inputFile`""
+            $psi.WorkingDirectory     = $workDir
+            $psi.RedirectStandardInput  = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+            $psi.UseShellExecute        = $false
+
+            $process = [System.Diagnostics.Process]::Start($psi)
+
+            # Start async readers BEFORE writing stdin to avoid buffer deadlock
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+
+            # Send 'p' for the preset quick-fix.
+            # Works because _getch() was replaced with getchar() in the patched source.
+            $process.StandardInput.WriteLine("p")
+            $process.StandardInput.Close()
+
+            $process.WaitForExit()
+
+            $stdout = $stdoutTask.Result
+            $stderr = $stderrTask.Result
+
+            Write-Host "Exit code: $($process.ExitCode)"
+            Write-Host "=== agb_edit output ==="
+            Write-Host $stdout
+            if ($stderr) { Write-Host "STDERR: $stderr" }
+
+            if (Test-Path $expectedOutput) {
+              Move-Item $expectedOutput "output/$oldName-patched.cia" -Force
+              Write-Host "Success: output/$oldName-patched.cia"
+            } else {
+              Write-Error "Expected output not found: $expectedOutput"
+              Write-Host "Contents of input/ dir:"
+              Get-ChildItem (Split-Path $inputFile)
+              exit 1
+            }
+          }
+
+      - name: Upload Patched Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Patched-GBA-CIAs
+          path: output/
