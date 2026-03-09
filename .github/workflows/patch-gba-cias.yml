@@ -1,4 +1,4 @@
-name: GBA Batch Patcher (agb_edit Final Fix)
+name: GBA Batch Patcher
 on:
   workflow_dispatch:
     inputs:
@@ -43,26 +43,25 @@ jobs:
       - name: Process CIAs
         shell: pwsh
         run: |
-          $agbEdit   = Resolve-Path "src/agb_edit/agb_edit.exe"
-          $workDir   = Split-Path $agbEdit
-
-          # agb_edit requires progfiles\ to sit next to the exe,
-          # so we run it from the exe's directory and pass absolute CIA paths.
+          $agbEdit = Resolve-Path "src/agb_edit/agb_edit.exe"
+          $workDir = Split-Path $agbEdit
 
           Get-ChildItem "input/*.cia" | ForEach-Object {
             $inputFile = $_.FullName
             $oldName   = $_.BaseName
             Write-Host "Patching: $($_.Name)"
 
-            # The preset quick-fix (P) always produces this exact suffix (confirmed from source):
-            #   <original name> (edit-sleepbtns-lcdghost-filter).cia
-            # Output lands next to the input file.
-            $expectedOutput = Join-Path (Split-Path $inputFile) "$oldName (edit-sleepbtns-lcdghost-filter).cia"
+            # Copy to a safe ASCII filename in the working dir to avoid Unicode
+            # mangling and UNPACKTMP path issues — agb_edit works entirely locally
+            $safeName   = "input_game"
+            $safeInput  = Join-Path $workDir "$safeName.cia"
+            $safeOutput = Join-Path $workDir "$safeName (edit-sleepbtns-lcdghost-filter).cia"
+            Copy-Item $inputFile $safeInput -Force
 
             $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName             = $agbEdit
-            $psi.Arguments            = "`"$inputFile`""
-            $psi.WorkingDirectory     = $workDir
+            $psi.FileName               = $agbEdit
+            $psi.Arguments              = "`"$safeInput`""
+            $psi.WorkingDirectory       = $workDir
             $psi.RedirectStandardInput  = $true
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError  = $true
@@ -70,12 +69,9 @@ jobs:
 
             $process = [System.Diagnostics.Process]::Start($psi)
 
-            # Start async readers BEFORE writing stdin to avoid buffer deadlock
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
 
-            # Send 'p' for the preset quick-fix.
-            # Works because _getch() was replaced with getchar() in the patched source.
             $process.StandardInput.WriteLine("p")
             $process.StandardInput.Close()
 
@@ -89,13 +85,15 @@ jobs:
             Write-Host $stdout
             if ($stderr) { Write-Host "STDERR: $stderr" }
 
-            if (Test-Path $expectedOutput) {
-              Move-Item $expectedOutput "output/$oldName-patched.cia" -Force
+            if (Test-Path $safeOutput) {
+              # Move result to output/ with the original (nice) name restored
+              Move-Item $safeOutput "output/$oldName-patched.cia" -Force
+              Remove-Item $safeInput -Force -ErrorAction SilentlyContinue
               Write-Host "Success: output/$oldName-patched.cia"
             } else {
-              Write-Error "Expected output not found: $expectedOutput"
-              Write-Host "Contents of input/ dir:"
-              Get-ChildItem (Split-Path $inputFile)
+              Write-Error "Expected output not found: $safeOutput"
+              Write-Host "Contents of workDir:"
+              Get-ChildItem $workDir
               exit 1
             }
           }
