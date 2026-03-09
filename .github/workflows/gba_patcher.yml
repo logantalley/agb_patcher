@@ -1,6 +1,10 @@
-name: GBA Batch Patcher (agb_edit)
+name: GBA Batch Patcher (agb_edit Fixed)
 on: 
-  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
+  workflow_dispatch:
+    inputs:
+      cia_url:
+        description: 'Direct link to .cia (Optional)'
+        required: false
 
 jobs:
   patch:
@@ -15,16 +19,29 @@ jobs:
           $url = "https://github.com/joemck/agb_edit/releases/download/v0.2.0a/agb_edit_020a.zip"
           Invoke-WebRequest -Uri $url -OutFile "agb_edit.zip"
           Expand-Archive -Path "agb_edit.zip" -DestinationPath "."
+          
+          # FIX: agb_edit looks for tools in a 'progfiles' subdirectory
+          if (!(Test-Path "progfiles")) { mkdir progfiles }
+          Move-Item "3dstool.exe", "makerom.exe", "ctrtool.exe" -Destination "progfiles\" -ErrorAction SilentlyContinue
+          
           mkdir input -Force
           mkdir output -Force
+
+      - name: Fetch Remote CIA (If URL provided)
+        if: "${{ github.event.inputs.cia_url != '' }}"
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "${{ github.event.inputs.cia_url }}" -OutFile "input/remote_game.cia"
 
       - name: Process CIAs
         shell: pwsh
         run: |
-          # The "P" preset applies: Gamma 1.54, Ghosting removal, and Sleep Patch
           Get-ChildItem "input/*.cia" | ForEach-Object {
             Write-Host "Patching: $($_.Name)"
+            # Use 'echo P' to automate the "P" preset (Lid Sleep + Gamma)
             echo "P" | .\agb_edit.exe "$($_.FullName)"
+            
+            # The tool modifies the file in place; move result to output
             Move-Item "$($_.FullName)" "output/"
           }
 
