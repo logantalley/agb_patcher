@@ -1,4 +1,4 @@
-name: GBA Batch Patcher (agb_edit Final)
+name: GBA Batch Patcher (agb_edit Final Fix)
 on: 
   workflow_dispatch:
     inputs:
@@ -16,19 +16,32 @@ jobs:
       - name: Download and Setup agb_edit
         shell: pwsh
         run: |
-          # 1. Download release
+          # 1. Download the correct zip
           $url = "https://github.com/joemck/agb_edit/releases/download/v0.2.0a/agb_edit_020a.zip"
           Invoke-WebRequest -Uri $url -OutFile "agb_edit.zip"
           
-          # 2. Extract and create the structure the tool expects
+          # 2. Extract
           Expand-Archive -Path "agb_edit.zip" -DestinationPath "temp_setup"
+          
+          # 3. Create the target structure
           mkdir progfiles -Force
           mkdir input -Force
           mkdir output -Force
           
-          # 3. Move agb_edit.exe to root, others to progfiles
-          Move-Item "temp_setup\agb_edit_v0.2.0a\agb_edit.exe" ".\"
-          Move-Item "temp_setup\agb_edit_v0.2.0a\*" "progfiles\" -ErrorAction SilentlyContinue
+          # 4. Find where the files actually are (handles any internal folder names)
+          $sourceDir = (Get-ChildItem -Path "temp_setup" -Filter "agb_edit.exe" -Recurse).DirectoryName
+          
+          # 5. Move agb_edit.exe to the ROOT
+          Move-Item "$sourceDir\agb_edit.exe" ".\" -Force
+          
+          # 6. Move the dependencies (3dstool, makerom, etc.) into \progfiles\
+          Get-ChildItem -Path $sourceDir -Exclude "agb_edit.exe" | Move-Item -Destination "progfiles\" -Force
+          
+          # Verify structure for the logs
+          Write-Host "--- Root Directory ---"
+          ls .
+          Write-Host "--- Progfiles Directory ---"
+          ls ./progfiles
 
       - name: Fetch Remote CIA (If URL provided)
         if: "${{ github.event.inputs.cia_url != '' }}"
@@ -43,10 +56,10 @@ jobs:
             $oldName = $_.BaseName
             Write-Host "Patching: $($_.Name)"
             
-            # Pipe 'P' for: Lid Sleep, Gamma 1.54, Ghosting & Vignette Removal
+            # Pipe 'P' to agb_edit for the "Perfect" preset
             echo "P" | .\agb_edit.exe "$($_.FullName)"
             
-            # Move and rename to include -patched suffix
+            # Move the modified file (renamed) to output
             Move-Item "$($_.FullName)" "output/$($oldName)-patched.cia"
           }
 
