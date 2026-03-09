@@ -12,7 +12,7 @@ jobs:
       - name: Download and Setup agb_edit
         shell: pwsh
         run: |
-          $url = "https://github.com/joemck/agb_edit/releases/download/v0.2.0a/agb_edit_v0.2.0a.zip"
+          $url = "https://github.com/joemck/agb_edit/releases/download/v0.2.0a/agb_edit_020a.zip"
           Invoke-WebRequest -Uri $url -OutFile "agb_edit.zip"
           Expand-Archive -Path "agb_edit.zip" -DestinationPath "."
           mkdir input -Force
