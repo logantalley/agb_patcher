@@ -1,0 +1,7 @@
+# Ignore binaries and temporary build files
+*.zip
+*.exe
+work/
+output/
+# If you don't want to store your CIAs in Git history:
+input/*.cia

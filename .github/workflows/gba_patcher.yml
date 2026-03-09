@@ -1,0 +1,35 @@
+name: GBA Batch Patcher (agb_edit)
+on: 
+  workflow_dispatch: # Allows manual trigger from the GitHub Actions tab
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download and Setup agb_edit
+        shell: pwsh
+        run: |
+          $url = "https://github.com/joemck/agb_edit/releases/download/v0.2.0a/agb_edit_v0.2.0a.zip"
+          Invoke-WebRequest -Uri $url -OutFile "agb_edit.zip"
+          Expand-Archive -Path "agb_edit.zip" -DestinationPath "."
+          mkdir input -Force
+          mkdir output -Force
+
+      - name: Process CIAs
+        shell: pwsh
+        run: |
+          # The "P" preset applies: Gamma 1.54, Ghosting removal, and Sleep Patch
+          Get-ChildItem "input/*.cia" | ForEach-Object {
+            Write-Host "Patching: $($_.Name)"
+            echo "P" | .\agb_edit.exe "$($_.FullName)"
+            Move-Item "$($_.FullName)" "output/"
+          }
+
+      - name: Upload Patched Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Patched-CIAs
+          path: output/
