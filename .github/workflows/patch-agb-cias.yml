@@ -1,4 +1,4 @@
-name: GBA Batch Patcher (agb_edit Final Fix)
+name: AGB Patcher
 on:
   workflow_dispatch:
     inputs:
