@@ -56,11 +56,17 @@ jobs:
             $oldName = $_.BaseName
             Write-Host "Patching: $($_.Name)"
             
-            # Pipe 'P' to agb_edit for the "Perfect" preset
-            echo "P" | .\agb_edit.exe "$($_.FullName)"
+            # Using a Here-String to ensure 'P' + NewLine is sent correctly
+            # This mimics someone pressing 'P' and then 'Enter'
+            "P`n" | .\agb_edit.exe "$($_.FullName)"
             
-            # Move the modified file (renamed) to output
-            Move-Item "$($_.FullName)" "output/$($oldName)-patched.cia"
+            # Brief pause to let the tool finish file-handling
+            Start-Sleep -Seconds 2
+            
+            # Rename and move result
+            if (Test-Path "$($_.FullName)") {
+                Move-Item "$($_.FullName)" "output/$($oldName)-patched.cia" -Force
+            }
           }
 
       - name: Upload Patched Files
