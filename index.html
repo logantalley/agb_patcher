@@ -3,70 +3,358 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Patched GBA CIAs — patch-20260310-005459</title>
+  <title>GBA.PATCH</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0a0a0f;
+      --surface: #0f0f1a;
+      --border:  #1a1a3a;
+      --accent:  #00ffcc;
+      --red:     #e94560;
+      --text:    #c8d8e8;
+      --muted:   #4a5a6a;
+      --glow:    0 0 24px rgba(0,255,204,0.35);
+    }
+
     body {
-      font-family: sans-serif;
-      background: #1a1a2e;
-      color: #eee;
-      text-align: center;
-      padding: 2rem;
-      margin: 0;
-    }
-    h1 { color: #e94560; margin-bottom: 0.25rem; }
-    .subtitle { color: #aaa; font-size: 0.9rem; margin-bottom: 2rem; }
-    .grid {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Share Tech Mono', monospace;
+      min-height: 100vh;
       display: flex;
-      flex-wrap: wrap;
+      flex-direction: column;
+      align-items: center;
       justify-content: center;
-      gap: 2rem;
+      padding: 2rem;
     }
+
+    /* Scanlines */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.1) 2px, rgba(0,0,0,0.1) 4px);
+      pointer-events: none; z-index: 100;
+    }
+
+    /* Grid */
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      background-image:
+        linear-gradient(rgba(0,255,204,0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,204,0.025) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none; z-index: 0;
+    }
+
+    .container {
+      position: relative; z-index: 1;
+      width: 100%; max-width: 620px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+
+    .logo {
+      font-family: 'Orbitron', sans-serif;
+      font-weight: 900;
+      font-size: clamp(2rem, 6vw, 3.2rem);
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-shadow: var(--glow);
+    }
+    .logo span { color: var(--red); text-shadow: 0 0 24px rgba(233,69,96,0.5); }
+
+    .tagline {
+      margin-top: 0.6rem;
+      font-size: 0.7rem;
+      color: var(--muted);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+    }
+
     .card {
-      background: #16213e;
-      border: 1px solid #e9456044;
-      border-radius: 12px;
-      padding: 1.5rem;
-      width: 220px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 2rem;
     }
-    .card img {
-      width: 180px;
-      height: 180px;
-      border-radius: 8px;
-      background: white;
-      padding: 6px;
+
+    label {
       display: block;
-      margin: 0 auto 1rem;
+      font-size: 0.65rem;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.6rem;
     }
-    .card p {
-      font-size: 0.85rem;
-      word-break: break-word;
-      margin: 0 0 0.75rem;
-      color: #ccc;
-    }
-    .card a {
+
+    textarea {
+      width: 100%;
+      height: 140px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: 'Share Tech Mono', monospace;
       font-size: 0.8rem;
-      color: #e94560;
-      text-decoration: none;
+      padding: 0.75rem;
+      resize: vertical;
+      outline: none;
+      transition: border-color 0.2s;
     }
-    .card a:hover { text-decoration: underline; }
-    footer { margin-top: 3rem; font-size: 0.75rem; color: #555; }
-    footer a { color: #555; }
+    textarea:focus { border-color: var(--accent); }
+    textarea::placeholder { color: var(--muted); }
+
+    .hint {
+      font-size: 0.62rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+      line-height: 1.5;
+    }
+
+    .btn-row {
+      margin-top: 1.5rem;
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    button {
+      font-family: 'Orbitron', sans-serif;
+      font-weight: 700;
+      font-size: 0.7rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 0.75rem 1.75rem;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      background: var(--accent);
+      color: #000;
+      transition: opacity 0.15s, box-shadow 0.15s;
+    }
+    button:hover:not(:disabled) { box-shadow: var(--glow); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #status {
+      font-size: 0.7rem;
+      color: var(--muted);
+      flex: 1;
+      text-align: right;
+    }
+
+    .progress {
+      margin-top: 1.5rem;
+      display: none;
+    }
+    .progress.visible { display: block; }
+
+    .progress-bar-wrap {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-bottom: 0.6rem;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.4s ease;
+      box-shadow: 0 0 8px var(--accent);
+    }
+
+    .progress-bar.indeterminate {
+      width: 40%;
+      animation: slide 1.4s ease-in-out infinite;
+    }
+
+    @keyframes slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
+
+    .log {
+      font-size: 0.65rem;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+    }
+
+    .log .ok  { color: var(--accent); }
+    .log .err { color: var(--red); }
+
+    footer {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 0.6rem;
+      color: var(--muted);
+      letter-spacing: 0.1em;
+    }
+    footer a { color: var(--muted); }
   </style>
 </head>
 <body>
-  <h1>Patched GBA CIAs</h1>
-  <p class="subtitle">Release: patch-20260310-005459 &nbsp;|&nbsp; Scan with FBI on your 3DS</p>
-  <div class="grid">
-    
-    <div class="card">
-      <img src="qr/Pokémon_Emerald_Imperium-patched.cia.png" alt="QR for Pokémon Emerald Imperium">
-      <p>Pokémon Emerald Imperium</p>
-      <a href="https://github.com/logantalley/agb_patcher/releases/download/patch-20260310-005459/Pok%C3%A9mon.Emerald.Imperium-patched.cia">Direct link</a>
+<div class="container">
+  <header>
+    <div class="logo">GBA<span>.</span>PATCH</div>
+    <div class="tagline">GBA Virtual Console CIA Patcher</div>
+  </header>
+
+  <div class="card">
+    <label for="urls">CIA Download URLs — one per line</label>
+    <textarea id="urls" placeholder="https://example.com/game1.cia&#10;https://example.com/game2.cia"></textarea>
+    <div class="hint">Paste direct links to .cia files. Each will be sleep-patched and gamma-corrected for 3DS.</div>
+
+    <div class="btn-row">
+      <button id="runBtn" onclick="run()">⚡ Patch</button>
+      <span id="status"></span>
+    </div>
+
+    <div class="progress" id="progress">
+      <div class="progress-bar-wrap">
+        <div class="progress-bar indeterminate" id="bar"></div>
+      </div>
+      <div class="log" id="log"></div>
     </div>
   </div>
+
   <footer>
-    Generated by GBA Batch Patcher &bull;
-    <a href="https://github.com/logantalley/agb_patcher/releases/tag/patch-20260310-005459">View Release</a>
+    GBA.PATCH &bull; <a href="https://github.com/OWNER/REPO">GitHub</a>
   </footer>
+</div>
+
+<script>
+  // ── CONFIG — update these two values ──────────────────────────────────────
+  const WORKER_URL = "https://YOUR_WORKER.workers.dev";
+  const PAGES_BASE = "https://OWNER.github.io/REPO";
+  // ──────────────────────────────────────────────────────────────────────────
+
+  let polling = false;
+
+  function setStatus(msg, cls = "") {
+    const el = document.getElementById("status");
+    el.textContent = msg;
+    el.className = cls;
+  }
+
+  function log(msg, cls = "") {
+    const el = document.getElementById("log");
+    const line = document.createElement("div");
+    if (cls) line.className = cls;
+    line.textContent = msg;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function setProgress(visible, indeterminate = true) {
+    document.getElementById("progress").classList.toggle("visible", visible);
+    document.getElementById("bar").classList.toggle("indeterminate", indeterminate);
+  }
+
+  async function run() {
+    if (polling) return;
+
+    const raw  = document.getElementById("urls").value.trim();
+    const urls = raw.split("\n").map(u => u.trim()).filter(Boolean);
+    if (urls.length === 0) { setStatus("Paste at least one URL"); return; }
+
+    document.getElementById("runBtn").disabled = true;
+    document.getElementById("log").innerHTML   = "";
+    setProgress(true);
+    setStatus("Dispatching workflow…");
+    log("Sending " + urls.length + " URL(s) to patcher…");
+
+    let run_id;
+    try {
+      const res = await fetch(WORKER_URL + "/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls })
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Dispatch failed");
+      run_id = data.run_id;
+      log("Workflow started — run #" + run_id, "ok");
+    } catch (e) {
+      log("Error: " + e.message, "err");
+      setStatus("Failed to start");
+      setProgress(false);
+      document.getElementById("runBtn").disabled = false;
+      return;
+    }
+
+    // Poll run status
+    polling = true;
+    let dots = 0;
+    const statusPoll = setInterval(async () => {
+      try {
+        const res  = await fetch(WORKER_URL + "/status?run_id=" + run_id);
+        const data = await res.json();
+        dots = (dots + 1) % 4;
+        setStatus("Running" + ".".repeat(dots + 1));
+
+        if (data.status === "completed") {
+          clearInterval(statusPoll);
+          if (data.conclusion === "success") {
+            log("Workflow complete — waiting for pages…", "ok");
+            waitForSession();
+          } else {
+            log("Workflow failed: " + (data.conclusion || "unknown"), "err");
+            setStatus("Failed");
+            setProgress(false);
+            document.getElementById("runBtn").disabled = false;
+            polling = false;
+          }
+        }
+      } catch (e) {
+        log("Status poll error: " + e.message, "err");
+      }
+    }, 6000);
+  }
+
+  async function waitForSession() {
+    setStatus("Building session page…");
+    let attempts = 0;
+    const maxAttempts = 20;
+
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const res  = await fetch(PAGES_BASE + "/sessions/latest.txt?t=" + Date.now());
+        const tag  = (await res.text()).trim();
+        if (!tag) return;
+
+        // Verify the session page actually exists
+        const pageRes = await fetch(PAGES_BASE + "/sessions/" + tag + "/index.html", { method: "HEAD" });
+        if (pageRes.ok) {
+          clearInterval(poll);
+          log("Session ready — redirecting…", "ok");
+          setStatus("Done!");
+          setProgress(false);
+          setTimeout(() => { window.location.href = PAGES_BASE + "/sessions/" + tag + "/"; }, 800);
+        }
+      } catch (e) {
+        // not ready yet, keep polling
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(poll);
+        log("Timed out waiting for session page. Check GitHub Actions.", "err");
+        setStatus("Timed out");
+        setProgress(false);
+        document.getElementById("runBtn").disabled = false;
+        polling = false;
+      }
+    }, 8000);
+  }
+</script>
 </body>
 </html>
