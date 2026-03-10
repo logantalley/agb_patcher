@@ -76,7 +76,6 @@ jobs:
             Write-Host "Processing: $($_.Name)"
             Write-Host "========================================"
 
-            # --- Copy to safe ASCII filename to avoid Unicode issues ---
             $safeName    = "input_game"
             $safeInput   = Join-Path $workDir "$safeName.cia"
             $safeDump    = Join-Path $workDir "$safeName.gba"
@@ -84,7 +83,6 @@ jobs:
             $safeOutput  = Join-Path $workDir "$safeName (edit-sleepbtns-lcdghost-filter).cia"
             Copy-Item $inputFile $safeInput -Force
 
-            # Helper to run agb_edit with a given stdin key
             function Run-AgbEdit($key) {
               $psi = New-Object System.Diagnostics.ProcessStartInfo
               $psi.FileName               = $agbEdit
@@ -106,14 +104,14 @@ jobs:
               return $proc.ExitCode
             }
 
-            # --- Step 1: Dump the GBA ROM out of the CIA ---
+            # --- Step 1: Dump the GBA ROM ---
             Write-Host "--- Step 1: Dumping GBA ROM ---"
             $exitCode = Run-AgbEdit "d"
             if ($exitCode -ne 0) { Write-Error "agb_edit ROM dump failed (exit $exitCode)"; exit 1 }
             if (-not (Test-Path $safeDump)) { Write-Error "ROM dump not found at: $safeDump"; exit 1 }
             Write-Host "ROM dumped: $safeDump ($(((Get-Item $safeDump).Length / 1MB).ToString('F2')) MB)"
 
-            # --- Step 2: Apply sleep patch to the GBA ROM ---
+            # --- Step 2: Apply sleep patch ---
             Write-Host "--- Step 2: Applying sleep patch ---"
             $psi2 = New-Object System.Diagnostics.ProcessStartInfo
             $psi2.FileName               = $sleepTool
@@ -133,21 +131,17 @@ jobs:
             if (-not (Test-Path $safePatched)) { Write-Error "Patched ROM not found at: $safePatched"; exit 1 }
             Write-Host "Sleep patch applied: $safePatched"
 
-            # --- Step 3: Splice the patched ROM back into the CIA ---
+            # --- Step 3: Splice patched ROM back into CIA ---
             Write-Host "--- Step 3: Splicing patched ROM back into CIA ---"
-
             $tmpDir = Join-Path $workDir "UNPACKTMP"
             if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
             New-Item -ItemType Directory -Path $tmpDir | Out-Null
 
-            # Unpack CIA contents
             & $ctrtool --contents "$tmpDir\file" "$safeInput"
             if ($LASTEXITCODE -ne 0) { Write-Error "ctrtool --contents failed"; exit 1 }
 
-            # Find the largest file (the main CXI)
             $mainCxi = (Get-ChildItem $tmpDir | Sort-Object Length -Descending | Select-Object -First 1).Name
 
-            # Unpack CXI
             & $dstool -xtf cxi "$tmpDir\$mainCxi" `
               --header "$tmpDir\ncchheader.bin" `
               --exh    "$tmpDir\exheader.bin"   `
@@ -155,13 +149,11 @@ jobs:
               --romfs  "$tmpDir\romfs.bin"
             if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -xtf cxi failed"; exit 1 }
 
-            # Unpack exefs
             & $dstool -xtf exefs "$tmpDir\exefs.bin" `
               --exefs-dir "$tmpDir\exefs"             `
               --header    "$tmpDir\exefsheader.bin"
             if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -xtf exefs failed"; exit 1 }
 
-            # Splice: overwrite the first N bytes of code.bin with the patched ROM
             $codeBin     = "$tmpDir\exefs\code.bin"
             $patchedRom  = [System.IO.File]::ReadAllBytes($safePatched)
             $codeBinData = [System.IO.File]::ReadAllBytes($codeBin)
@@ -170,18 +162,16 @@ jobs:
               Write-Error "Patched ROM ($romSize bytes) is larger than code.bin ($($codeBinData.Length) bytes)!"
               exit 1
             }
-            Write-Host "Splicing $romSize bytes of patched ROM into code.bin ($($codeBinData.Length) bytes total)"
+            Write-Host "Splicing $romSize bytes into code.bin ($($codeBinData.Length) bytes total)"
             [System.Array]::Copy($patchedRom, $codeBinData, $romSize)
             [System.IO.File]::WriteAllBytes($codeBin, $codeBinData)
             Write-Host "Splice complete"
 
-            # Repack exefs
             & $dstool -ctf exefs "$tmpDir\newExefs.bin" `
               --exefs-dir "$tmpDir\exefs"                `
               --header    "$tmpDir\exefsheader.bin"
             if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -ctf exefs failed"; exit 1 }
 
-            # Repack CXI
             & $dstool -ctf cxi "$tmpDir\modified.cxi"  `
               --header "$tmpDir\ncchheader.bin"          `
               --exh    "$tmpDir\exheader.bin"            `
@@ -189,7 +179,6 @@ jobs:
               --romfs  "$tmpDir\romfs.bin"
             if ($LASTEXITCODE -ne 0) { Write-Error "3dstool -ctf cxi failed"; exit 1 }
 
-            # Reassemble CIA using relative paths (makerom requires this)
             $contentFiles = Get-ChildItem "$tmpDir\file.*" | Sort-Object Name
             $makeromArgs  = @("-f", "cia")
             foreach ($cf in $contentFiles) {
@@ -206,21 +195,18 @@ jobs:
             if ($LASTEXITCODE -ne 0) { Write-Error "makerom failed"; exit 1 }
             Set-Location $origDir
 
-            # Clean up temp dir
             Remove-Item $tmpDir -Recurse -Force
 
-            # --- Step 4: Run agb_edit preset quick-fix (gamma + button combo) ---
+            # --- Step 4: agb_edit preset fix (gamma + button combo) ---
             Write-Host "--- Step 4: Applying agb_edit preset fix ---"
             $exitCode = Run-AgbEdit "p"
             if ($exitCode -ne 0) { Write-Error "agb_edit preset fix failed (exit $exitCode)"; exit 1 }
             if (-not (Test-Path $safeOutput)) {
               Write-Error "Expected output not found: $safeOutput"
-              Write-Host "Contents of workDir:"
               Get-ChildItem $workDir
               exit 1
             }
 
-            # --- Move final result to output/ with original name restored ---
             Move-Item $safeOutput "$origDir\output\$oldName-patched.cia" -Force
             Remove-Item $safeInput   -Force -ErrorAction SilentlyContinue
             Remove-Item $safeDump    -Force -ErrorAction SilentlyContinue
@@ -287,7 +273,10 @@ jobs:
           for filename in sorted(os.listdir(cia_dir)):
               if not filename.endswith(".cia"):
                   continue
-              encoded  = urllib.parse.quote(filename)
+
+              # GitHub replaces spaces with dots in release asset filenames
+              github_filename = filename.replace(" ", ".")
+              encoded  = urllib.parse.quote(github_filename)
               url      = f"https://github.com/{repo}/releases/download/{tag}/{encoded}"
               safe     = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
               qr_path  = f"qr/{safe}.png"
@@ -295,7 +284,7 @@ jobs:
 
               img = qrcode.make(url)
               img.save(qr_path)
-              print(f"QR saved: {qr_path}")
+              print(f"QR saved: {qr_path}  ->  {url}")
 
               cards.append(f"""
               <div class="card">
