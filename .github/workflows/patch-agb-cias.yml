@@ -1,15 +1,13 @@
-name: GBA Batch Patcher (agb_edit Final Fix)
+name: GBA Batch Patcher
 on:
   workflow_dispatch:
     inputs:
       cia_urls:
-        description: 'Direct links to .cia files, one per line (Optional)'
+        description: 'Direct links to .cia files, one per line'
         required: false
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
   patch:
@@ -40,12 +38,14 @@ jobs:
         run: |
           mkdir input  -Force
           mkdir output -Force
+          mkdir output\icons -Force
 
-      - name: Fetch Remote CIAs (If URLs provided)
+      - name: Fetch Remote CIAs (if URLs provided)
         if: "${{ github.event.inputs.cia_urls != '' }}"
         shell: pwsh
         run: |
-          $urls = "${{ github.event.inputs.cia_urls }}" -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $urls = "${{ github.event.inputs.cia_urls }}" -split "`n" |
+                  ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
           $i = 1
           foreach ($url in $urls) {
             $encoded  = $url.Split('/')[-1].Split('?')[0]
@@ -68,12 +68,14 @@ jobs:
           $makerom   = Join-Path $progfiles "makerom.exe"
           $origDir   = $env:GITHUB_WORKSPACE
 
+          $counter = 1
+
           Get-ChildItem "input/*.cia" | ForEach-Object {
-            $inputFile = $_.FullName
-            $oldName   = $_.BaseName
+            $inputFile   = $_.FullName
+            $displayName = $_.BaseName
             Write-Host ""
             Write-Host "========================================"
-            Write-Host "Processing: $($_.Name)"
+            Write-Host "Processing [$counter]: $($_.Name)"
             Write-Host "========================================"
 
             $safeName    = "input_game"
@@ -104,15 +106,39 @@ jobs:
               return $proc.ExitCode
             }
 
-            # --- Step 1: Dump the GBA ROM ---
+            # ── Step 1: Dump the GBA ROM ──────────────────────────────────────
             Write-Host "--- Step 1: Dumping GBA ROM ---"
             $exitCode = Run-AgbEdit "d"
             if ($exitCode -ne 0) { Write-Error "agb_edit ROM dump failed (exit $exitCode)"; exit 1 }
-            if (-not (Test-Path $safeDump)) { Write-Error "ROM dump not found at: $safeDump"; exit 1 }
-            Write-Host "ROM dumped: $safeDump ($(((Get-Item $safeDump).Length / 1MB).ToString('F2')) MB)"
+            if (-not (Test-Path $safeDump)) { Write-Error "ROM dump not found: $safeDump"; exit 1 }
+            Write-Host "ROM dumped: $safeDump ($(((Get-Item $safeDump).Length/1MB).ToString('F2')) MB)"
 
-            # --- Step 2: Apply sleep patch ---
-            Write-Host "--- Step 2: Applying sleep patch ---"
+            # ── Step 2: Extract SMDH icon (non-fatal) ────────────────────────
+            Write-Host "--- Step 2: Extracting SMDH icon ---"
+            try {
+              $tmpIcon = Join-Path $workDir "ICONTMP"
+              if (Test-Path $tmpIcon) { Remove-Item $tmpIcon -Recurse -Force }
+              New-Item -ItemType Directory -Path $tmpIcon | Out-Null
+
+              & $ctrtool --contents "$tmpIcon\file" "$safeInput" 2>$null | Out-Null
+              $mainCxiIcon = (Get-ChildItem $tmpIcon | Sort-Object Length -Descending | Select-Object -First 1).FullName
+              & $dstool -xtf cxi $mainCxiIcon --exefs "$tmpIcon\exefs.bin" 2>$null | Out-Null
+              & $dstool -xtf exefs "$tmpIcon\exefs.bin" --exefs-dir "$tmpIcon\exefs" --header "$tmpIcon\exefsheader.bin" 2>$null | Out-Null
+
+              $smdhPath = "$tmpIcon\exefs\icon.bin"
+              if (Test-Path $smdhPath) {
+                Copy-Item $smdhPath "$origDir\output\icons\processed-cia-$counter.bin" -Force
+                Write-Host "Icon extracted -> output/icons/processed-cia-$counter.bin"
+              } else {
+                Write-Host "icon.bin not found in ExeFS — no icon for this title"
+              }
+              Remove-Item $tmpIcon -Recurse -Force
+            } catch {
+              Write-Host "Icon extraction failed (non-fatal): $_"
+            }
+
+            # ── Step 3: Apply sleep patch ─────────────────────────────────────
+            Write-Host "--- Step 3: Applying sleep patch ---"
             $psi2 = New-Object System.Diagnostics.ProcessStartInfo
             $psi2.FileName               = $sleepTool
             $psi2.Arguments              = "`"$safeDump`" `"$safePatched`" --sleep-combo L+R+Select --no-hard-reset"
@@ -128,11 +154,11 @@ jobs:
             Write-Host $outTask2.Result
             if ($errTask2.Result) { Write-Host "STDERR: $($errTask2.Result)" }
             if ($proc2.ExitCode -ne 0) { Write-Error "Sleep patch failed (exit $($proc2.ExitCode))"; exit 1 }
-            if (-not (Test-Path $safePatched)) { Write-Error "Patched ROM not found at: $safePatched"; exit 1 }
-            Write-Host "Sleep patch applied: $safePatched"
+            if (-not (Test-Path $safePatched)) { Write-Error "Patched ROM not found: $safePatched"; exit 1 }
+            Write-Host "Sleep patch applied."
 
-            # --- Step 3: Splice patched ROM back into CIA ---
-            Write-Host "--- Step 3: Splicing patched ROM back into CIA ---"
+            # ── Step 4: Splice patched ROM back into CIA ──────────────────────
+            Write-Host "--- Step 4: Splicing patched ROM back into CIA ---"
             $tmpDir = Join-Path $workDir "UNPACKTMP"
             if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
             New-Item -ItemType Directory -Path $tmpDir | Out-Null
@@ -159,13 +185,12 @@ jobs:
             $codeBinData = [System.IO.File]::ReadAllBytes($codeBin)
             $romSize     = $patchedRom.Length
             if ($romSize -gt $codeBinData.Length) {
-              Write-Error "Patched ROM ($romSize bytes) is larger than code.bin ($($codeBinData.Length) bytes)!"
+              Write-Error "Patched ROM ($romSize bytes) larger than code.bin ($($codeBinData.Length) bytes)!"
               exit 1
             }
             Write-Host "Splicing $romSize bytes into code.bin ($($codeBinData.Length) bytes total)"
             [System.Array]::Copy($patchedRom, $codeBinData, $romSize)
             [System.IO.File]::WriteAllBytes($codeBin, $codeBinData)
-            Write-Host "Splice complete"
 
             & $dstool -ctf exefs "$tmpDir\newExefs.bin" `
               --exefs-dir "$tmpDir\exefs"                `
@@ -189,16 +214,14 @@ jobs:
               $makeromArgs += @("-content", "${cxiPath}:${fileNum}:${indNum}")
             }
             $makeromArgs += @("-o", "$safeName.cia")
-            Write-Host "Running: makerom $makeromArgs"
             Set-Location $workDir
             & $makerom @makeromArgs
             if ($LASTEXITCODE -ne 0) { Write-Error "makerom failed"; exit 1 }
             Set-Location $origDir
-
             Remove-Item $tmpDir -Recurse -Force
 
-            # --- Step 4: agb_edit preset fix (gamma + button combo) ---
-            Write-Host "--- Step 4: Applying agb_edit preset fix ---"
+            # ── Step 5: agb_edit preset fix ───────────────────────────────────
+            Write-Host "--- Step 5: Applying agb_edit preset fix ---"
             $exitCode = Run-AgbEdit "p"
             if ($exitCode -ne 0) { Write-Error "agb_edit preset fix failed (exit $exitCode)"; exit 1 }
             if (-not (Test-Path $safeOutput)) {
@@ -207,11 +230,16 @@ jobs:
               exit 1
             }
 
-            Move-Item $safeOutput "$origDir\output\$oldName-patched.cia" -Force
+            # ── Numbered output filename — zero encoding ambiguity ────────────
+            $outFilename = "processed-cia-$counter.cia"
+            Move-Item $safeOutput "$origDir\output\$outFilename" -Force
             Remove-Item $safeInput   -Force -ErrorAction SilentlyContinue
             Remove-Item $safeDump    -Force -ErrorAction SilentlyContinue
             Remove-Item $safePatched -Force -ErrorAction SilentlyContinue
-            Write-Host "Done: output/$oldName-patched.cia"
+
+            Add-Content "$origDir\output\manifest.tsv" "$counter`t$displayName" -Encoding UTF8
+            Write-Host "Done: output/$outFilename  (display: $displayName)"
+            $counter++
           }
 
       - name: Generate release tag
@@ -230,7 +258,7 @@ jobs:
           body: "Auto-generated by GBA Batch Patcher workflow."
           files: output/*.cia
 
-      - name: Upload patched CIAs as artifact (backup)
+      - name: Upload artifact (CIAs + manifest + icons)
         uses: actions/upload-artifact@v4
         with:
           name: Patched-GBA-CIAs
@@ -246,51 +274,110 @@ jobs:
           ref: gh-pages
           fetch-depth: 0
 
-      - name: Download patched CIAs from artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: Patched-GBA-CIAs
-          path: cias
+          path: artifact
 
       - name: Install Python dependencies
         run: pip install "qrcode[pil]" pillow --quiet
 
-      - name: Generate QR codes and index.html
+      - name: Generate session page
         env:
           REPO: ${{ github.repository }}
           TAG:  ${{ needs.patch.outputs.tag }}
         run: |
-          mkdir -p qr
           python3 - << 'PYEOF'
-          import os, urllib.parse, qrcode
+          import os, struct, qrcode
+          from pathlib import Path
+          from PIL import Image
 
           repo = os.environ["REPO"]
           tag  = os.environ["TAG"]
 
-          cia_dir = "cias"
-          cards   = []
+          # Load manifest: number -> display name
+          manifest = {}
+          manifest_path = Path("artifact/manifest.tsv")
+          if manifest_path.exists():
+              for line in manifest_path.read_text(encoding="utf-8").splitlines():
+                  line = line.strip()
+                  if "\t" in line:
+                      num, display = line.split("\t", 1)
+                      manifest[num.strip()] = display.strip()
 
-          for filename in sorted(os.listdir(cia_dir)):
-              if not filename.endswith(".cia"):
-                  continue
+          # SMDH icon decoder (RGB565, Morton-swizzled 8x8 tiles, 48x48 large icon)
+          SMDH_MAGIC  = b'SMDH'
+          ICON_OFFSET = 0x24C0
+          TILE        = 8
 
-              # GitHub replaces spaces with dots in release asset filenames
-              github_filename = filename.replace(" ", ".").replace("&", ".")
-              encoded  = urllib.parse.quote(github_filename)
-              url      = f"https://github.com/{repo}/releases/download/{tag}/{encoded}"
-              safe     = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
-              qr_path  = f"qr/{safe}.png"
-              label    = filename.replace("-patched.cia", "")
+          def morton_to_xy(z):
+              x = y = 0
+              for i in range(8):
+                  x |= ((z >> (2*i))   & 1) << i
+                  y |= ((z >> (2*i+1)) & 1) << i
+              return x, y
 
-              img = qrcode.make(url)
-              img.save(qr_path)
-              print(f"QR saved: {qr_path}  ->  {url}")
+          MORTON = [morton_to_xy(z) for z in range(TILE * TILE)]
 
-              cards.append(f"""
-              <div class="card">
-                <img src="{qr_path}" alt="QR for {label}">
-                <p>{label}</p>
-                <a href="{url}">Direct link</a>
+          def rgb565(w):
+              return ((w>>11)&0x1F)*255//31, ((w>>5)&0x3F)*255//63, (w&0x1F)*255//31
+
+          def decode_icon(data):
+              raw = data[ICON_OFFSET: ICON_OFFSET + 0x1200]
+              img = Image.new("RGB", (48, 48))
+              px  = img.load()
+              idx = 0
+              for ty in range(6):
+                  for tx in range(6):
+                      for z in range(TILE*TILE):
+                          lx, ly = MORTON[z]
+                          word = struct.unpack_from("<H", raw, idx)[0]; idx += 2
+                          px[tx*TILE+lx, ty*TILE+ly] = rgb565(word)
+              return img.resize((96, 96), Image.NEAREST)
+
+          # Build session directories
+          session_dir = Path(f"sessions/{tag}")
+          qr_dir      = session_dir / "qr"
+          icon_dir    = session_dir / "icons"
+          qr_dir.mkdir(parents=True, exist_ok=True)
+          icon_dir.mkdir(parents=True, exist_ok=True)
+
+          cards = []
+
+          for cia_path in sorted(Path("artifact").glob("processed-cia-*.cia"),
+                                  key=lambda p: int(p.stem.split("-")[-1])):
+              num      = cia_path.stem.split("-")[-1]
+              filename = cia_path.name
+              label    = manifest.get(num, filename)
+              url      = f"https://github.com/{repo}/releases/download/{tag}/{filename}"
+
+              # QR code
+              qr_out = qr_dir / f"{filename}.png"
+              qrcode.make(url).save(qr_out)
+              print(f"QR [{num}]: {url}")
+
+              # Icon
+              icon_html = ""
+              smdh_src  = Path(f"artifact/icons/processed-cia-{num}.bin")
+              if smdh_src.exists():
+                  try:
+                      data = smdh_src.read_bytes()
+                      if data[:4] == SMDH_MAGIC:
+                          icon_png = icon_dir / f"processed-cia-{num}.png"
+                          decode_icon(data).save(icon_png)
+                          icon_html = f'<img class="game-icon" src="icons/processed-cia-{num}.png" alt="">'
+                          print(f"  Icon decoded: {icon_png}")
+                      else:
+                          print(f"  SMDH magic mismatch for [{num}]")
+                  except Exception as e:
+                      print(f"  Icon decode failed [{num}]: {e}")
+
+              cards.append(f"""<div class="card">
+                {icon_html}
+                <img class="qr" src="qr/{filename}.png" alt="QR">
+                <p class="label">{label}</p>
+                <a class="dl" href="{url}">Direct link</a>
               </div>""")
 
           cards_html = "\n".join(cards)
@@ -300,80 +387,103 @@ jobs:
           <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Patched GBA CIAs — {tag}</title>
+            <title>GBA.PATCH — {tag}</title>
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
             <style>
-              body {{
-                font-family: sans-serif;
-                background: #1a1a2e;
-                color: #eee;
-                text-align: center;
-                padding: 2rem;
-                margin: 0;
+              *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+              :root {{
+                --bg: #0a0a0f; --panel: #0f0f1a; --border: #1e2040;
+                --accent: #00ff88; --accent2: #0077ff; --red: #e94560;
+                --text: #c8d0e0; --dim: #5a6080;
               }}
-              h1 {{ color: #e94560; margin-bottom: 0.25rem; }}
-              .subtitle {{ color: #aaa; font-size: 0.9rem; margin-bottom: 2rem; }}
+              body {{
+                background: var(--bg); color: var(--text);
+                font-family: 'Share Tech Mono', monospace;
+                min-height: 100vh; padding: 2rem;
+              }}
+              body::before {{
+                content: ''; position: fixed; inset: 0;
+                background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.13) 2px, rgba(0,0,0,0.13) 4px);
+                pointer-events: none; z-index: 999;
+              }}
+              header {{
+                max-width: 1100px; margin: 0 auto 2.5rem;
+                display: flex; align-items: center; justify-content: space-between;
+                flex-wrap: wrap; gap: 1rem;
+                border-bottom: 1px solid var(--border); padding-bottom: 1.5rem;
+              }}
+              .logo {{
+                font-family: 'Orbitron', sans-serif; font-weight: 900;
+                font-size: clamp(1.3rem, 3vw, 2rem);
+                color: var(--accent); text-shadow: 0 0 20px rgba(0,255,136,0.4);
+              }}
+              .logo span {{ color: var(--red); }}
+              .tag-label {{ font-size: 0.65rem; color: var(--dim); letter-spacing: 0.15em; margin-top: 0.25rem; }}
+              .back {{
+                font-family: 'Orbitron', sans-serif; font-size: 0.6rem; font-weight: 700;
+                letter-spacing: 0.1em; text-transform: uppercase;
+                color: var(--dim); border: 1px solid var(--border);
+                padding: 0.5rem 1rem; border-radius: 4px; text-decoration: none;
+                transition: color 0.15s, border-color 0.15s;
+              }}
+              .back:hover {{ color: var(--text); border-color: var(--dim); }}
+              main {{ max-width: 1100px; margin: 0 auto; }}
               .grid {{
-                display: flex;
-                flex-wrap: wrap;
-                justify-content: center;
-                gap: 2rem;
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                gap: 1.5rem;
               }}
               .card {{
-                background: #16213e;
-                border: 1px solid #e9456044;
-                border-radius: 12px;
-                padding: 1.5rem;
-                width: 220px;
+                background: var(--panel); border: 1px solid var(--border);
+                border-radius: 8px; padding: 1.25rem 1rem;
+                display: flex; flex-direction: column; align-items: center; gap: 0.75rem;
+                transition: border-color 0.2s;
               }}
-              .card img {{
-                width: 180px;
-                height: 180px;
-                border-radius: 8px;
-                background: white;
-                padding: 6px;
-                display: block;
-                margin: 0 auto 1rem;
+              .card:hover {{ border-color: rgba(0,255,136,0.25); }}
+              .game-icon {{
+                width: 72px; height: 72px; image-rendering: pixelated;
+                border-radius: 10px; border: 1px solid var(--border);
               }}
-              .card p {{
-                font-size: 0.85rem;
-                word-break: break-word;
-                margin: 0 0 0.75rem;
-                color: #ccc;
+              .qr {{ width: 150px; height: 150px; background: white; padding: 5px; border-radius: 5px; }}
+              .label {{ font-size: 0.72rem; color: var(--text); text-align: center; word-break: break-word; line-height: 1.4; }}
+              .dl {{ font-size: 0.65rem; color: var(--accent2); text-decoration: none; opacity: 0.7; transition: opacity 0.15s; }}
+              .dl:hover {{ opacity: 1; text-decoration: underline; }}
+              footer {{
+                max-width: 1100px; margin: 3rem auto 0;
+                border-top: 1px solid var(--border); padding-top: 1.5rem;
+                font-size: 0.65rem; color: var(--dim); letter-spacing: 0.1em;
               }}
-              .card a {{
-                font-size: 0.8rem;
-                color: #e94560;
-                text-decoration: none;
-              }}
-              .card a:hover {{ text-decoration: underline; }}
-              footer {{ margin-top: 3rem; font-size: 0.75rem; color: #555; }}
-              footer a {{ color: #555; }}
+              footer a {{ color: var(--dim); }}
             </style>
           </head>
           <body>
-            <h1>Patched GBA CIAs</h1>
-            <p class="subtitle">Release: {tag} &nbsp;|&nbsp; Scan with FBI on your 3DS</p>
-            <div class="grid">
-              {cards_html}
-            </div>
+            <header>
+              <div>
+                <div class="logo">GBA<span>.</span>PATCH</div>
+                <div class="tag-label">{tag} &bull; {len(cards)} title(s) &bull; Scan with FBI</div>
+              </div>
+              <a class="back" href="/">&#8592; New Session</a>
+            </header>
+            <main><div class="grid">{cards_html}</div></main>
             <footer>
-              Generated by GBA Batch Patcher &bull;
-              <a href="https://github.com/{repo}/releases/tag/{tag}">View Release</a>
+              GBA.PATCH &bull;
+              <a href="https://github.com/{repo}/releases/tag/{tag}">View Release on GitHub</a>
             </footer>
           </body>
           </html>"""
 
-          with open("index.html", "w", encoding="utf-8") as f:
-              f.write(html)
-
-          print(f"index.html written — {len(cards)} card(s)")
+          (session_dir / "index.html").write_text(html, encoding="utf-8")
+          print(f"Session page written: sessions/{tag}/index.html ({len(cards)} cards)")
           PYEOF
 
-      - name: Commit and push to gh-pages
+      - name: Update latest.txt and push
         run: |
+          TAG="${{ needs.patch.outputs.tag }}"
+          echo "$TAG" > sessions/latest.txt
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add index.html qr/
+          git add sessions/
           git status
-          git commit -m "Update QR page for ${{ needs.patch.outputs.tag }}"
+          git diff --staged --quiet && echo "Nothing to commit" || git commit -m "Session: $TAG"
           git push origin gh-pages
