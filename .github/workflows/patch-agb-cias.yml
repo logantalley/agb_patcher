@@ -275,7 +275,7 @@ jobs:
                   continue
 
               # GitHub replaces spaces with dots in release asset filenames
-              github_filename = filename.replace(" ", ".")
+              github_filename = filename.replace(" ", ".").replace("&", ".")
               encoded  = urllib.parse.quote(github_filename)
               url      = f"https://github.com/{repo}/releases/download/{tag}/{encoded}"
               safe     = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
