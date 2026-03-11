@@ -147,6 +147,16 @@ jobs:
                 }
                 Write-Host "0x$($i.ToString('X4')): $row"
             }
+
+            # ── DEBUG 3: Dump first 0x600 bytes as hex to find real sleep routine ──
+            Write-Host "=== ROM[0x000-0x600] ==="
+            for ($i = 0x0; $i -lt 0x600; $i += 16) {
+                $row = ""
+                for ($j = $i; $j -lt [Math]::Min($i+16, 0x600); $j++) {
+                    $row += "{0:X2} " -f $romBytes[$j]
+                }
+                Write-Host "0x$($i.ToString('X4')): $row"
+            }
             
             # ── Step 2: Extract SMDH icon (non-fatal) ────────────────────────
             Write-Host "--- Step 2: Extracting SMDH icon ---"
