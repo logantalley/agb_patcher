@@ -2,20 +2,19 @@
 """
 nsui_patch.py - NSUI-compatible GBA sleep patch for 3DS Virtual Console
 
-Replicates the patching strategy used by NSUI (New Super Ultimate Injector):
-- Patch 1: ARM sleep entry — replaces BX r1 with STR r0,[r1] to use hardware
-            REG_HALTCNT sleep, which the 3DS wakes from automatically on lid open
-- Patch 2: ARM wake pointer — replaces high-ROM function pointer with 0x03007FFC
-            (GBA interrupt vector) so wake is driven by hardware interrupt
-- Patch 3: Thumb wake check NOP (optional — not present in all SDK versions)
-- Patch 4: ARM wake pointer near Thumb section (optional)
+Handles two SDK variants of the GBA VC sleep routine:
 
-P1 and P2 are required. P3 and P4 are optional — some ROM SDK versions (including
-certain romhacks) do not have the Thumb wake check section at all. P1+P2 alone are
-sufficient for correct lid-open wake behavior.
+SDK VARIANT A (most retail games):
+  Sleep entry: ADD r0,pc,#N + BX r1  ->  STR r0,[r1]
+  Wake ptrs:   high-ROM pointers (0x09Exxxxx) -> 0x03007FFC
+  Thumb check: LDR r0,[pc] + BX r0   ->  NOP
 
-Wake pointers are identified by pointing into the top 2MB of ROM space
-(0x09E00000-0x09FFFFFF) where sleep handler code is injected by patching tools.
+SDK VARIANT B (some romhacks / different SDK version):
+  Sleep entry: MOV r14,pc + BX r1    ->  MOV pc,lr
+  (The routine already uses STR->HALTCNT; we skip the wake handler call instead)
+  No wake pointers or Thumb section needed.
+
+Both variants result in hardware sleep that the 3DS wakes automatically on lid open.
 
 Idempotent: already-patched ROMs are detected and skipped gracefully.
 
@@ -28,23 +27,21 @@ import sys
 import struct
 import argparse
 
-INTERRUPT_VECTOR = b'\xfc\x7f\x00\x03'  # 0x03007FFC — GBA IWRAM interrupt handler
-STR_R0_R1        = b'\x00\x00\x81\xe5'  # STR r0,[r1]  — already-patched P1
-BX_R1            = b'\x11\xff\x2f\xe1'  # BX r1        — unpatched P1
-THUMB_NOP        = b'\x04\x60'          # MOV r0,r0    — already-patched P3
-THUMB_BX_R0      = b'\x00\x47'          # BX r0        — unpatched P3
-LDR_R0_PC        = b'\x06\x48'          # LDR r0,[pc,#N] — P3 anchor (fixed encoding)
+INTERRUPT_VECTOR = b'\xfc\x7f\x00\x03'  # 0x03007FFC
+STR_R0_R1        = b'\x00\x00\x81\xe5'  # STR r0,[r1]  — Variant A P1 patched
+BX_R1            = b'\x11\xff\x2f\xe1'  # BX r1
+MOV_R14_PC       = b'\x0f\xe0\xa0\xe1'  # MOV r14,pc   — Variant B anchor
+MOV_PC_LR        = b'\x0e\xf0\xa0\xe1'  # MOV pc,lr    — Variant B patch
+THUMB_NOP        = b'\x04\x60'
+THUMB_BX_R0      = b'\x00\x47'
+LDR_R0_PC        = b'\x06\x48'
+ADD_R0_PC_MASK   = (0x00, 0x8f, 0xe2)   # bytes [1],[2],[3] of ADD r0,pc,#N
 
 P3_SEARCH_WINDOW = 0x2000
 
 
 def _find_wake_ptr(data, start, end):
-    """
-    Scan [start, end) in 4-byte steps for a high-ROM wake pointer
-    (0x09E00000-0x09FFFFFF) or an already-patched INTERRUPT_VECTOR.
-    Returns (offset, already_patched) or (None, None).
-    """
-    for j in range(start, end, 4):
+    for j in range(start, min(end, len(data) - 4), 4):
         val = struct.unpack('<I', bytes(data[j:j+4]))[0]
         if 0x09E00000 <= val <= 0x09FFFFFF:
             return j, False
@@ -56,11 +53,9 @@ def _find_wake_ptr(data, start, end):
 def apply_nsui_sleep_patch(rom_bytes, verbose=False):
     """
     Apply NSUI-compatible sleep patch to a GBA ROM.
-    Idempotent — already-applied patches are detected and skipped.
-    P3/P4 are optional and skipped gracefully if not present.
-
-    Returns (patched_bytes, patch_list, skipped_list) on success,
-    or raises ValueError with a descriptive message on failure.
+    Detects SDK variant automatically.
+    Returns (patched_bytes, patch_list, skipped_list).
+    Raises ValueError if no supported sleep routine is found.
     """
     data    = bytearray(rom_bytes)
     patches = []
@@ -70,47 +65,76 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
         if verbose:
             print(f"  {msg}")
 
-    # ------------------------------------------------------------------
-    # PATCH 1: ARM sleep entry (REQUIRED)
-    # Scan for: ADD r0, pc, #N  (XX 00 8f e2)
-    #     then: BX r1           (11 ff 2f e1)   <-- unpatched
-    #        or STR r0,[r1]     (00 00 81 e5)   <-- already patched
-    # ------------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Detect SDK variant by scanning for both anchor patterns
+    # Variant A: ADD r0,pc,#N  (XX 00 8f e2)  then BX r1 or STR r0,[r1]
+    # Variant B: MOV r14,pc    (0f e0 a0 e1)  then BX r1 or MOV pc,lr
+    # ----------------------------------------------------------------
+    variant   = None
     p1_offset = None
+
     for i in range(0, len(data) - 8, 4):
-        if data[i+1] == 0x00 and data[i+2] == 0x8f and data[i+3] == 0xe2:
-            next4 = bytes(data[i+4:i+8])
+        b1, b2, b3 = data[i+1], data[i+2], data[i+3]
+        next4 = bytes(data[i+4:i+8])
+
+        # Variant A anchor: ADD r0, pc, #N
+        if b1 == 0x00 and b2 == 0x8f and b3 == 0xe2:
             if next4 == BX_R1:
+                variant   = 'A'
                 p1_offset = i + 4
                 data[p1_offset:p1_offset+4] = STR_R0_R1
                 patches.append(('P1_sleep_entry', p1_offset))
-                log(f"P1 @ 0x{p1_offset:08x}: BX r1 -> STR r0,[r1]")
+                log(f"P1 [Variant A] @ 0x{p1_offset:08x}: BX r1 -> STR r0,[r1]")
                 break
             elif next4 == STR_R0_R1:
+                variant   = 'A'
                 p1_offset = i + 4
                 skipped.append(('P1_sleep_entry', p1_offset))
-                log(f"P1 @ 0x{p1_offset:08x}: already patched (STR r0,[r1]), skipping")
+                log(f"P1 [Variant A] @ 0x{p1_offset:08x}: already patched, skipping")
+                break
+
+        # Variant B anchor: STR r0,[r1] two instructions before MOV r14,pc + BX r1
+        # The STR is what puts the GBA into hardware sleep; MOV+BX is the wake poll call
+        if (bytes(data[i:i+4]) == MOV_R14_PC and
+                i >= 8 and bytes(data[i-8:i-4]) == STR_R0_R1):
+            if next4 == BX_R1:
+                variant   = 'B'
+                p1_offset = i + 4
+                data[p1_offset:p1_offset+4] = MOV_PC_LR
+                patches.append(('P1_sleep_entry', p1_offset))
+                log(f"P1 [Variant B] @ 0x{p1_offset:08x}: BX r1 -> MOV pc,lr")
+                break
+            elif next4 == MOV_PC_LR:
+                variant   = 'B'
+                p1_offset = i + 4
+                skipped.append(('P1_sleep_entry', p1_offset))
+                log(f"P1 [Variant B] @ 0x{p1_offset:08x}: already patched, skipping")
                 break
 
     if p1_offset is None:
         raise ValueError(
-            "P1 not found: ADD r0,pc,#N + (BX r1 or STR r0,[r1]) pattern missing. "
-            "Unsupported sleep routine structure.")
+            "No supported sleep routine found. "
+            "Neither Variant A (ADD r0,pc + BX r1) nor "
+            "Variant B (MOV r14,pc + BX r1) pattern detected.")
 
-    # ------------------------------------------------------------------
-    # PATCH 2: ARM wake pointer (REQUIRED)
-    # Scan forward from P1 for first high-ROM pointer (0x09E00000-0x09FFFFFF)
-    # pointing to injected sleep handler code at end of ROM,
-    # or existing INTERRUPT_VECTOR (already patched).
-    # Low ROM pointers (0x08000000-0x09DFFFFF) are left alone — they are
-    # legitimate game function pointers, not sleep handler pointers.
-    # ------------------------------------------------------------------
+    log(f"SDK Variant: {variant}")
+
+    # Variant B is complete after P1 — the routine already uses hardware
+    # sleep via STR->HALTCNT; patching BX r1->MOV pc,lr skips the
+    # button-polling wake handler and lets hardware wake handle everything.
+    if variant == 'B':
+        return bytes(data), patches, skipped
+
+    # ----------------------------------------------------------------
+    # Variant A only: P2, P3, P4
+    # ----------------------------------------------------------------
+
+    # P2: first high-ROM wake pointer after P1 (required)
     p2_off, p2_done = _find_wake_ptr(data, p1_offset + 4, p1_offset + 0x300)
     if p2_off is None:
         raise ValueError(
-            "P2 not found: no high-ROM wake pointer (0x09Exxxxx) or existing "
-            "0x03007FFC found within 0x300 bytes of P1. "
-            "Unsupported sleep routine structure.")
+            "P2 not found: no high-ROM wake pointer (0x09Exxxxx) or "
+            "0x03007FFC within 0x300 bytes of P1.")
     if p2_done:
         log(f"P2 @ 0x{p2_off:08x}: already patched (0x03007FFC), skipping")
         skipped.append(('P2_wake_ptr', p2_off))
@@ -120,18 +144,9 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
         data[p2_off:p2_off+4] = INTERRUPT_VECTOR
         patches.append(('P2_wake_ptr', p2_off))
 
-    # ------------------------------------------------------------------
-    # PATCH 3: Thumb wake check NOP (OPTIONAL)
-    # Scan within P3_SEARCH_WINDOW bytes of P1 for:
-    #   06 48  (LDR r0, [pc, #N]) — fixed Thumb encoding
-    #   00 47  (BX r0)            — unpatched
-    #   04 60  (MOV r0,r0 NOP)    — already patched
-    # Not present in all SDK versions — failure is non-fatal.
-    # ------------------------------------------------------------------
+    # P3: Thumb BX r0 -> NOP (optional)
     p3_idx    = None
-    p3_offset = None
     search_end = min(p1_offset + P3_SEARCH_WINDOW, len(data) - 4)
-
     pos = p1_offset
     while pos < search_end:
         idx = bytes(data).find(LDR_R0_PC, pos, search_end)
@@ -139,33 +154,28 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
             break
         suffix = bytes(data[idx+2:idx+4])
         if suffix == THUMB_BX_R0:
-            p3_idx    = idx
-            p3_offset = idx + 2
-            data[p3_offset:p3_offset+2] = THUMB_NOP
-            patches.append(('P3_thumb_nop', p3_offset))
-            log(f"P3 @ 0x{p3_offset:08x}: BX r0 -> MOV r0,r0 (NOP)")
+            p3_idx = idx
+            data[idx+2:idx+4] = THUMB_NOP
+            patches.append(('P3_thumb_nop', idx+2))
+            log(f"P3 @ 0x{idx+2:08x}: BX r0 -> NOP")
             break
         elif suffix == THUMB_NOP:
-            p3_idx    = idx
-            p3_offset = idx + 2
-            skipped.append(('P3_thumb_nop', p3_offset))
-            log(f"P3 @ 0x{p3_offset:08x}: already patched (NOP), skipping")
+            p3_idx = idx
+            skipped.append(('P3_thumb_nop', idx+2))
+            log(f"P3 @ 0x{idx+2:08x}: already patched, skipping")
             break
         pos = idx + 2
 
     if p3_idx is None:
-        log("P3 not present in this ROM's sleep routine (optional — skipping)")
+        log("P3 not present in this ROM's sleep routine (optional)")
 
-    # ------------------------------------------------------------------
-    # PATCH 4: ARM wake pointer near Thumb section (OPTIONAL)
-    # Only attempted if P3 was found.
-    # ------------------------------------------------------------------
+    # P4: second high-ROM wake pointer near Thumb section (optional)
     if p3_idx is not None:
         p4_off, p4_done = _find_wake_ptr(data, p3_idx + 4, p3_idx + 0x40)
         if p4_off is None:
-            log("P4 not found near Thumb section (optional — skipping)")
+            log("P4 not found near Thumb section (optional)")
         elif p4_done:
-            log(f"P4 @ 0x{p4_off:08x}: already patched (0x03007FFC), skipping")
+            log(f"P4 @ 0x{p4_off:08x}: already patched, skipping")
             skipped.append(('P4_wake_ptr', p4_off))
         else:
             val = struct.unpack('<I', bytes(data[p4_off:p4_off+4]))[0]
