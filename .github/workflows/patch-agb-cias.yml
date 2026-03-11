@@ -112,7 +112,24 @@ jobs:
             if ($exitCode -ne 0) { Write-Error "agb_edit ROM dump failed (exit $exitCode)"; exit 1 }
             if (-not (Test-Path $safeDump)) { Write-Error "ROM dump not found: $safeDump"; exit 1 }
             Write-Host "ROM dumped: $safeDump ($(((Get-Item $safeDump).Length/1MB).ToString('F2')) MB)"
-
+            # ── DEBUG: Scan for BX r1 candidates ──────────────────────────────
+            Write-Host "--- DEBUG: Scanning for sleep routine ---"
+            $romBytes = [System.IO.File]::ReadAllBytes($safeDump)
+            Write-Host "ROM size: $($romBytes.Length) bytes"
+            # Find all BX r1 (11 ff 2f e1) in first 128KB
+            for ($i = 0; $i -lt [Math]::Min($romBytes.Length - 8, 0x20000); $i += 4) {
+                if ($romBytes[$i] -eq 0x11 -and $romBytes[$i+1] -eq 0xff -and $romBytes[$i+2] -eq 0x2f -and $romBytes[$i+3] -eq 0xe1) {
+                    $pre = "{0:X2} {1:X2} {2:X2} {3:X2}" -f $romBytes[$i-4],$romBytes[$i-3],$romBytes[$i-2],$romBytes[$i-1]
+                    Write-Host "BX r1 @ 0x$($i.ToString('X8')): pre=[$pre]"
+                }
+            }
+            # Find all ADD r0,pc,#N (XX 00 8f e2)
+            for ($i = 0; $i -lt [Math]::Min($romBytes.Length - 8, 0x20000); $i += 4) {
+                if ($romBytes[$i+1] -eq 0x00 -and $romBytes[$i+2] -eq 0x8f -and $romBytes[$i+3] -eq 0xe2) {
+                    $next = "{0:X2} {1:X2} {2:X2} {3:X2}" -f $romBytes[$i+4],$romBytes[$i+5],$romBytes[$i+6],$romBytes[$i+7]
+                    Write-Host "ADD r0,pc @ 0x$($i.ToString('X8')): next=[$next]"
+                }
+            }
             # ── Step 2: Extract SMDH icon (non-fatal) ────────────────────────
             Write-Host "--- Step 2: Extracting SMDH icon ---"
             try {
