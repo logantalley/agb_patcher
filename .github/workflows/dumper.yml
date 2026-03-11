@@ -1,0 +1,123 @@
+name: Dump GBA ROMs from CIAs
+on:
+  workflow_dispatch:
+    inputs:
+      cia_urls:
+        description: 'Direct links to .cia files, one per line'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  dump:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install MinGW (gcc)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+          update: false
+
+      - name: Build agb_edit from patched source
+        shell: msys2 {0}
+        run: |
+          cd src/agb_edit
+          gcc -Os -o agb_edit.exe src/main.c src/gbacia.c src/videolut.c src/console_ui.c
+          ls -la agb_edit.exe
+
+      - name: Setup directories
+        shell: pwsh
+        run: |
+          mkdir input  -Force
+          mkdir output -Force
+
+      - name: Fetch CIAs from URLs
+        shell: pwsh
+        run: |
+          $urls = "${{ github.event.inputs.cia_urls }}" -split "`n" |
+                  ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+          $i = 1
+          foreach ($url in $urls) {
+            $encoded  = $url.Split('/')[-1].Split('?')[0]
+            $filename = [System.Uri]::UnescapeDataString($encoded)
+            if ($filename -notmatch '\.cia$') { $filename = "game_$i.cia" }
+            Write-Host "Downloading: $url -> input/$filename"
+            Invoke-WebRequest -Uri $url -OutFile "input/$filename"
+            $i++
+          }
+
+      - name: Dump GBA ROMs
+        shell: pwsh
+        run: |
+          $agbEdit  = Resolve-Path "src/agb_edit/agb_edit.exe"
+          $workDir  = Split-Path $agbEdit
+          $origDir  = $env:GITHUB_WORKSPACE
+
+          Get-ChildItem "input/*.cia" | ForEach-Object {
+            $inputFile   = $_.FullName
+            $displayName = $_.BaseName
+            Write-Host ""
+            Write-Host "========================================"
+            Write-Host "Dumping ROM from: $($_.Name)"
+            Write-Host "========================================"
+
+            $safeInput = Join-Path $workDir "input_game.cia"
+            $safeDump  = Join-Path $workDir "input_game.gba"
+            Copy-Item $inputFile $safeInput -Force
+
+            # Run agb_edit with 'd' to dump the ROM
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName               = $agbEdit
+            $psi.Arguments              = "`"$safeInput`""
+            $psi.WorkingDirectory       = $workDir
+            $psi.RedirectStandardInput  = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+            $psi.UseShellExecute        = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            $proc.StandardInput.WriteLine("d")
+            $proc.StandardInput.Close()
+            $proc.WaitForExit()
+            Write-Host $outTask.Result
+            if ($errTask.Result) { Write-Host "STDERR: $($errTask.Result)" }
+
+            if ($proc.ExitCode -ne 0) {
+              Write-Error "agb_edit dump failed (exit $($proc.ExitCode))"
+              exit 1
+            }
+
+            if (-not (Test-Path $safeDump)) {
+              Write-Error "ROM dump not found at: $safeDump"
+              exit 1
+            }
+
+            $sizeMB = ((Get-Item $safeDump).Length / 1MB).ToString('F2')
+            Write-Host "Dumped: $displayName.gba ($sizeMB MB)"
+
+            Copy-Item $safeDump "$origDir\output\$displayName.gba" -Force
+            Remove-Item $safeInput -Force -ErrorAction SilentlyContinue
+            Remove-Item $safeDump  -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Generate release tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = "dump-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "Tag: $tag"
+
+      - name: Upload ROMs to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "GBA ROM Dumps — ${{ steps.tag.outputs.tag }}"
+          body: "GBA ROMs dumped from CIA files."
+          files: output/*.gba
