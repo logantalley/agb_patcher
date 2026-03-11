@@ -130,6 +130,24 @@ jobs:
                     Write-Host "ADD r0,pc @ 0x$($i.ToString('X8')): next=[$next]"
                 }
             }
+            # ── DEBUG 2: Find 06 48 patterns near sleep routine ──────────────
+            $p1Off = 0x224  # from previous output
+            for ($i = 0; $i -lt [Math]::Min($romBytes.Length - 4, 0x10000); $i += 2) {
+                if ($romBytes[$i] -eq 0x06 -and $romBytes[$i+1] -eq 0x48) {
+                    $n = "{0:X2} {1:X2}" -f $romBytes[$i+2],$romBytes[$i+3]
+                    Write-Host "06 48 @ 0x$($i.ToString('X8')): next=[$n]"
+                }
+            }
+            # Also dump 0x200-0x400 as hex to see the data table around P2
+            Write-Host "=== ROM[0x200-0x300] ==="
+            for ($i = 0x200; $i -lt 0x300; $i += 16) {
+                $row = ""
+                for ($j = $i; $j -lt [Math]::Min($i+16, 0x300); $j++) {
+                    $row += "{0:X2} " -f $romBytes[$j]
+                }
+                Write-Host "0x$($i.ToString('X4')): $row"
+            }
+            
             # ── Step 2: Extract SMDH icon (non-fatal) ────────────────────────
             Write-Host "--- Step 2: Extracting SMDH icon ---"
             try {
