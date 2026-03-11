@@ -60,7 +60,7 @@ jobs:
         shell: pwsh
         run: |
           $agbEdit   = Resolve-Path "src/agb_edit/agb_edit.exe"
-          $sleepTool = Resolve-Path "tools/gba-sleephack-patcher-tool.exe"
+          $nsuiPatch = Resolve-Path "tools/nsui_patch.py"
           $workDir   = Split-Path $agbEdit
           $progfiles = Join-Path $workDir "progfiles"
           $ctrtool   = Join-Path $progfiles "ctrtool.exe"
@@ -137,25 +137,13 @@ jobs:
               Write-Host "Icon extraction failed (non-fatal): $_"
             }
 
-            # ── Step 3: Apply sleep patch ─────────────────────────────────────
-            Write-Host "--- Step 3: Applying sleep patch ---"
-            $psi2 = New-Object System.Diagnostics.ProcessStartInfo
-            $psi2.FileName               = $sleepTool
-            $psi2.Arguments              = "`"$safeDump`" `"$safePatched`" --sleep-combo L+R+Select --no-hard-reset"
-            $psi2.WorkingDirectory       = $workDir
-            $psi2.RedirectStandardOutput = $true
-            $psi2.RedirectStandardError  = $true
-            $psi2.UseShellExecute        = $false
-            $proc2 = [System.Diagnostics.Process]::Start($psi2)
-            $outTask2 = $proc2.StandardOutput.ReadToEndAsync()
-            $errTask2 = $proc2.StandardError.ReadToEndAsync()
-            $proc2.WaitForExit()
-            Write-Host "=== sleephack output ==="
-            Write-Host $outTask2.Result
-            if ($errTask2.Result) { Write-Host "STDERR: $($errTask2.Result)" }
-            if ($proc2.ExitCode -ne 0) { Write-Error "Sleep patch failed (exit $($proc2.ExitCode))"; exit 1 }
+            # ── Step 3: Apply NSUI-compatible sleep patch ─────────────────────
+            Write-Host "--- Step 3: Applying NSUI sleep patch ---"
+            $patchOut = & python3 $nsuiPatch $safeDump $safePatched --verbose 2>&1
+            Write-Host $patchOut
+            if ($LASTEXITCODE -ne 0) { Write-Error "NSUI sleep patch failed (exit $LASTEXITCODE)"; exit 1 }
             if (-not (Test-Path $safePatched)) { Write-Error "Patched ROM not found: $safePatched"; exit 1 }
-            Write-Host "Sleep patch applied."
+            Write-Host "Sleep patch applied (wakes on lid open)."
 
             # ── Step 4: Splice patched ROM back into CIA ──────────────────────
             Write-Host "--- Step 4: Splicing patched ROM back into CIA ---"
