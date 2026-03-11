@@ -10,10 +10,6 @@ Replicates the patching strategy used by NSUI (New Super Ultimate Injector):
 - Patch 3: Thumb wake check — NOPs out the BX r0 to skip button polling
 - Patch 4: ARM wake pointer (second instance) — same as Patch 2
 
-Unlike gba-sleephack-patcher-tool which injects a 504-byte software wake handler
-and polls for a button combo, this patch uses the GBA hardware interrupt system
-so the game resumes automatically when the 3DS lid is opened.
-
 Idempotent: already-patched ROMs are detected and skipped gracefully.
 
 Usage:
@@ -25,12 +21,15 @@ import sys
 import struct
 import argparse
 
-INTERRUPT_VECTOR  = b'\xfc\x7f\x00\x03'  # 0x03007FFC — GBA IWRAM interrupt handler
-STR_R0_R1         = b'\x00\x00\x81\xe5'  # STR r0,[r1] — already-patched P1 marker
-BX_R1             = b'\x11\xff\x2f\xe1'  # BX r1       — unpatched P1 target
-THUMB_NOP         = b'\x04\x60'          # MOV r0,r0   — already-patched P3 marker
-THUMB_BX_R0       = b'\x00\x47'          # BX r0       — unpatched P3 target
-THUMB_P3_PATTERN  = bytes([0xd0, 0xf0, 0x90, 0xfd, 0x06, 0x48])  # prefix before P3
+INTERRUPT_VECTOR = b'\xfc\x7f\x00\x03'  # 0x03007FFC — GBA IWRAM interrupt handler
+STR_R0_R1        = b'\x00\x00\x81\xe5'  # STR r0,[r1]  — already-patched P1
+BX_R1            = b'\x11\xff\x2f\xe1'  # BX r1        — unpatched P1
+THUMB_NOP        = b'\x04\x60'          # MOV r0,r0    — already-patched P3
+THUMB_BX_R0      = b'\x00\x47'          # BX r0        — unpatched P3
+LDR_R0_PC        = b'\x06\x48'          # LDR r0,[pc,#N] — P3 prefix (fixed)
+
+# Search window for P3/P4 relative to P1 offset
+P3_SEARCH_WINDOW = 0x2000
 
 
 def apply_nsui_sleep_patch(rom_bytes, verbose=False):
@@ -103,36 +102,43 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
 
     # ------------------------------------------------------------------
     # PATCH 3: Thumb wake check NOP
-    # Scan for: d0 f0 90 fd 06 48  (Thumb BL + LDR r0)
-    #     then: 00 47 (BX r0) or 04 60 (NOP)
+    # Scan within P3_SEARCH_WINDOW bytes of P1 for:
+    #   06 48  (LDR r0, [pc, #N])  — fixed encoding
+    #   00 47  (BX r0)             — unpatched
+    #   04 60  (MOV r0,r0 NOP)     — already patched
+    #
+    # The preceding Thumb BL is NOT used as a scan anchor because its
+    # encoding is a relative branch and differs per game.
     # ------------------------------------------------------------------
     p3_idx    = None
     p3_offset = None
+    search_end = min(p1_offset + P3_SEARCH_WINDOW, len(data) - 4)
 
-    pos = 0
-    while True:
-        idx = bytes(data).find(THUMB_P3_PATTERN, pos)
+    pos = p1_offset
+    while pos < search_end:
+        idx = bytes(data).find(LDR_R0_PC, pos, search_end)
         if idx == -1:
             break
-        suffix = bytes(data[idx+6:idx+8])
+        suffix = bytes(data[idx+2:idx+4])
         if suffix == THUMB_BX_R0:
             p3_idx    = idx
-            p3_offset = idx + 6
+            p3_offset = idx + 2
             data[p3_offset:p3_offset+2] = THUMB_NOP
             patches.append(('P3_thumb_nop', p3_offset))
             log(f"P3 @ 0x{p3_offset:08x}: BX r0 -> MOV r0,r0 (NOP)")
             break
         elif suffix == THUMB_NOP:
             p3_idx    = idx
-            p3_offset = idx + 6
+            p3_offset = idx + 2
             skipped.append(('P3_thumb_nop', p3_offset))
             log(f"P3 @ 0x{p3_offset:08x}: already patched (NOP), skipping")
             break
-        pos = idx + 1
+        pos = idx + 2
 
     if p3_idx is None:
         raise ValueError(
-            "P3 not found: Thumb BL + LDR + (BX r0 or NOP) pattern missing. "
+            f"P3 not found: LDR r0,[pc,#N] + (BX r0 or NOP) not found within "
+            f"0x{P3_SEARCH_WINDOW:x} bytes of P1 (0x{p1_offset:08x}). "
             "Unsupported sleep routine structure.")
 
     # ------------------------------------------------------------------
