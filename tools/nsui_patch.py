@@ -14,6 +14,8 @@ Unlike gba-sleephack-patcher-tool which injects a 504-byte software wake handler
 and polls for a button combo, this patch uses the GBA hardware interrupt system
 so the game resumes automatically when the 3DS lid is opened.
 
+Idempotent: already-patched ROMs are detected and skipped gracefully.
+
 Usage:
     python3 nsui_patch.py input.gba output.gba
     python3 nsui_patch.py input.gba output.gba --dry-run
@@ -23,17 +25,25 @@ import sys
 import struct
 import argparse
 
-INTERRUPT_VECTOR = b'\xfc\x7f\x00\x03'  # 0x03007FFC — GBA IWRAM interrupt handler
+INTERRUPT_VECTOR  = b'\xfc\x7f\x00\x03'  # 0x03007FFC — GBA IWRAM interrupt handler
+STR_R0_R1         = b'\x00\x00\x81\xe5'  # STR r0,[r1] — already-patched P1 marker
+BX_R1             = b'\x11\xff\x2f\xe1'  # BX r1       — unpatched P1 target
+THUMB_NOP         = b'\x04\x60'          # MOV r0,r0   — already-patched P3 marker
+THUMB_BX_R0       = b'\x00\x47'          # BX r0       — unpatched P3 target
+THUMB_P3_PATTERN  = bytes([0xd0, 0xf0, 0x90, 0xfd, 0x06, 0x48])  # prefix before P3
+
 
 def apply_nsui_sleep_patch(rom_bytes, verbose=False):
     """
     Apply NSUI-compatible sleep patch to a GBA ROM.
+    Idempotent — already-applied patches are detected and skipped.
 
-    Returns (patched_bytes, patch_list) on success,
+    Returns (patched_bytes, patch_list, skipped_list) on success,
     or raises ValueError with a descriptive message on failure.
     """
-    data = bytearray(rom_bytes)
+    data    = bytearray(rom_bytes)
     patches = []
+    skipped = []
 
     def log(msg):
         if verbose:
@@ -42,33 +52,34 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
     # ------------------------------------------------------------------
     # PATCH 1: ARM sleep entry
     # Scan for: ADD r0, pc, #N  (XX 00 8f e2)
-    #           BX r1           (11 ff 2f e1)
-    # Replace BX r1 with: STR r0, [r1]  (00 00 81 e5)
-    #
-    # r1 holds REG_HALTCNT (0x04000301). STR writes directly to it,
-    # triggering hardware sleep that the 3DS wakes from on lid open.
+    #     then: BX r1           (11 ff 2f e1)   <-- unpatched
+    #        or STR r0,[r1]     (00 00 81 e5)   <-- already patched
     # ------------------------------------------------------------------
     p1_offset = None
     for i in range(0, len(data) - 8, 4):
-        if (data[i+1] == 0x00 and data[i+2] == 0x8f and data[i+3] == 0xe2 and
-                data[i+4] == 0x11 and data[i+5] == 0xff and
-                data[i+6] == 0x2f and data[i+7] == 0xe1):
-            p1_offset = i + 4
-            data[p1_offset:p1_offset+4] = b'\x00\x00\x81\xe5'
-            patches.append(('P1_sleep_entry', p1_offset))
-            log(f"P1 @ 0x{p1_offset:08x}: BX r1 -> STR r0,[r1]")
-            break
+        if data[i+1] == 0x00 and data[i+2] == 0x8f and data[i+3] == 0xe2:
+            next4 = bytes(data[i+4:i+8])
+            if next4 == BX_R1:
+                p1_offset = i + 4
+                data[p1_offset:p1_offset+4] = STR_R0_R1
+                patches.append(('P1_sleep_entry', p1_offset))
+                log(f"P1 @ 0x{p1_offset:08x}: BX r1 -> STR r0,[r1]")
+                break
+            elif next4 == STR_R0_R1:
+                p1_offset = i + 4
+                skipped.append(('P1_sleep_entry', p1_offset))
+                log(f"P1 @ 0x{p1_offset:08x}: already patched (STR r0,[r1]), skipping")
+                break
 
     if p1_offset is None:
         raise ValueError(
-            "P1 not found: ADD r0,pc,#N + BX r1 pattern missing. "
-            "ROM may already be patched or use an unsupported sleep routine.")
+            "P1 not found: ADD r0,pc,#N + (BX r1 or STR r0,[r1]) pattern missing. "
+            "Unsupported sleep routine structure.")
 
     # ------------------------------------------------------------------
     # PATCH 2: ARM wake pointer (near sleep entry)
-    # Scan forward from P1 for a ROM pointer in the 0x09Exxxxx-0x09Fxxxxx
-    # range — these point to the injected sleep handler at end of ROM.
-    # Replace with 0x03007FFC (interrupt vector).
+    # Scan forward from P1 for high-ROM pointer (0x09Exxxxx-0x09Fxxxxx)
+    # or existing INTERRUPT_VECTOR value.
     # ------------------------------------------------------------------
     p2_found = False
     for j in range(p1_offset + 4, p1_offset + 0x300, 4):
@@ -79,35 +90,53 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
             patches.append(('P2_wake_ptr', j))
             p2_found = True
             break
+        elif data[j:j+4] == INTERRUPT_VECTOR:
+            log(f"P2 @ 0x{j:08x}: already patched (0x03007FFC), skipping")
+            skipped.append(('P2_wake_ptr', j))
+            p2_found = True
+            break
 
     if not p2_found:
         raise ValueError(
-            "P2 not found: no high-ROM pointer found after P1. "
-            "ROM may already be patched or the sleep routine structure differs.")
+            "P2 not found: no high-ROM pointer or existing 0x03007FFC found after P1. "
+            "Unsupported sleep routine structure.")
 
     # ------------------------------------------------------------------
     # PATCH 3: Thumb wake check NOP
-    # Scan for exact sequence:
-    #   d0 f0 90 fd  — Thumb BL (call to sleep function)
-    #   06 48        — LDR r0, [pc, #N]
-    #   00 47        — BX r0 (branch to wake handler)
-    # Replace 00 47 with 04 60 (MOV r0, r0 — Thumb NOP)
+    # Scan for: d0 f0 90 fd 06 48  (Thumb BL + LDR r0)
+    #     then: 00 47 (BX r0) or 04 60 (NOP)
     # ------------------------------------------------------------------
-    pattern3 = bytes([0xd0, 0xf0, 0x90, 0xfd, 0x06, 0x48, 0x00, 0x47])
-    p3_idx = bytes(data).find(pattern3)
-    if p3_idx == -1:
+    p3_idx    = None
+    p3_offset = None
+
+    pos = 0
+    while True:
+        idx = bytes(data).find(THUMB_P3_PATTERN, pos)
+        if idx == -1:
+            break
+        suffix = bytes(data[idx+6:idx+8])
+        if suffix == THUMB_BX_R0:
+            p3_idx    = idx
+            p3_offset = idx + 6
+            data[p3_offset:p3_offset+2] = THUMB_NOP
+            patches.append(('P3_thumb_nop', p3_offset))
+            log(f"P3 @ 0x{p3_offset:08x}: BX r0 -> MOV r0,r0 (NOP)")
+            break
+        elif suffix == THUMB_NOP:
+            p3_idx    = idx
+            p3_offset = idx + 6
+            skipped.append(('P3_thumb_nop', p3_offset))
+            log(f"P3 @ 0x{p3_offset:08x}: already patched (NOP), skipping")
+            break
+        pos = idx + 1
+
+    if p3_idx is None:
         raise ValueError(
-            "P3 not found: Thumb BL + LDR + BX r0 pattern missing. "
-            "ROM may already be patched or use a different Thumb wake check.")
-    p3_offset = p3_idx + 6
-    data[p3_offset:p3_offset+2] = b'\x04\x60'
-    patches.append(('P3_thumb_nop', p3_offset))
-    log(f"P3 @ 0x{p3_offset:08x}: BX r0 -> MOV r0,r0 (NOP)")
+            "P3 not found: Thumb BL + LDR + (BX r0 or NOP) pattern missing. "
+            "Unsupported sleep routine structure.")
 
     # ------------------------------------------------------------------
     # PATCH 4: ARM wake pointer (near Thumb section)
-    # Scan forward from P3 for second high-ROM pointer.
-    # Replace with 0x03007FFC.
     # ------------------------------------------------------------------
     p4_found = False
     for j in range(p3_idx + 4, p3_idx + 0x40, 4):
@@ -118,13 +147,18 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
             patches.append(('P4_wake_ptr', j))
             p4_found = True
             break
+        elif data[j:j+4] == INTERRUPT_VECTOR:
+            log(f"P4 @ 0x{j:08x}: already patched (0x03007FFC), skipping")
+            skipped.append(('P4_wake_ptr', j))
+            p4_found = True
+            break
 
     if not p4_found:
         raise ValueError(
-            "P4 not found: no high-ROM pointer found near Thumb section. "
-            "ROM may already be patched or the data table structure differs.")
+            "P4 not found: no high-ROM pointer or existing 0x03007FFC found near Thumb section. "
+            "Unsupported sleep routine structure.")
 
-    return bytes(data), patches
+    return bytes(data), patches, skipped
 
 
 def main():
@@ -144,14 +178,18 @@ def main():
     print(f"Input:  {args.input} ({len(rom):,} bytes)")
 
     try:
-        patched, patches = apply_nsui_sleep_patch(rom, verbose=args.verbose or args.dry_run)
+        patched, patches, skipped = apply_nsui_sleep_patch(
+            rom, verbose=args.verbose or args.dry_run)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
-    names = [n for n, _ in patches]
-    offsets = {n: hex(o) for n, o in patches}
-    print(f"Patches: {', '.join(f'{n}@{offsets[n]}' for n, _ in patches)}")
+    if patches:
+        print(f"Applied: {', '.join(f'{n}@{hex(o)}' for n,o in patches)}")
+    if skipped:
+        print(f"Skipped (already patched): {', '.join(f'{n}@{hex(o)}' for n,o in skipped)}")
+    if not patches and not skipped:
+        print("WARNING: no patches applied or detected")
 
     if args.dry_run:
         print("Dry run — no output written.")
