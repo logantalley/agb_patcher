@@ -107,22 +107,34 @@ def apply_nsui_sleep_patch(rom_bytes, verbose=False):
             print(f"  {msg}")
 
     # ── P1: ARM sleep entry (required) ───────────────────────────────────────
-    # Scan for ADD r0,pc,#N (XX 00 8F E2) immediately followed by BX r1 or STR r0,[r1]
-    p1_offset = None
+    # Scan for ADD r0,pc,#N (XX 00 8F E2) immediately followed by BX r1 or STR r0,[r1].
+    #
+    # We always prefer to find an unpatched BX r1 site — if one exists anywhere
+    # in the ROM it's the real target. Only fall back to treating STR r0,[r1] as
+    # "already patched" when NO unpatched BX r1 site exists at all, which means
+    # NSUI already ran on this ROM. This avoids false positives where original game
+    # code happens to contain ADD r0,pc,#N + STR r0,[r1].
+    p1_offset    = None
+    p1_str_site  = None   # first ADD+STR_R0_R1 candidate (possible already-patched)
+
     for i in range(0, len(data) - 8, 4):
         if data[i+1] == 0x00 and data[i+2] == 0x8f and data[i+3] == 0xe2:
             nxt = bytes(data[i+4:i+8])
             if nxt == BX_R1:
+                # Unambiguous unpatched site — use it immediately
                 p1_offset = i + 4
                 data[p1_offset:p1_offset+4] = STR_R0_R1
                 applied.append(('P1_sleep_entry', p1_offset))
                 log(f"P1 @ 0x{p1_offset:08x}: BX r1 -> STR r0,[r1]")
                 break
-            elif nxt == STR_R0_R1:
-                p1_offset = i + 4
-                skipped.append(('P1_sleep_entry', p1_offset))
-                log(f"P1 @ 0x{p1_offset:08x}: already patched")
-                break
+            elif nxt == STR_R0_R1 and p1_str_site is None:
+                p1_str_site = i + 4   # record first candidate, keep scanning
+
+    if p1_offset is None and p1_str_site is not None:
+        # No unpatched BX r1 anywhere — the STR site is genuinely already patched
+        p1_offset = p1_str_site
+        skipped.append(('P1_sleep_entry', p1_offset))
+        log(f"P1 @ 0x{p1_offset:08x}: already patched")
 
     if p1_offset is None:
         raise ValueError("P1 not found: ADD r0,pc,#N + BX r1 pattern missing.")
