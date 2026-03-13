@@ -172,27 +172,44 @@ def thumb_str_rh_r0(hw: int):
 def find_irq_hook(rom: bytes):
     """
     Scan ROM for the Thumb sequence:
-        LDR r0,[pc,#N]   ; loads 0x03007FFC from data table
-        STR rH,[r0]      ; installs game's handler into IRQ vector
+        LDR r0,[pc,#N]   ; loads IRQ vector address from data table
+        STR rH,[r0]      ; installs game's handler into that vector slot
+
+    Searches for all known GBA IRQ vector addresses:
+        0x03007FFC  standard SDK (FireRed, Ruby, most retail)
+        0x03007E40  Emerald and Emerald-based hacks
+        0x03007640  some other titles
 
     Returns (data_word_off, str_instr_off, handler_reg, return_thumb_gba).
     Raises RuntimeError if not found.
     """
-    IRQ_VEC = struct.pack('<I', 0x03007FFC)
+    # Known IRQ vector slot addresses used across GBA titles
+    IRQ_VECTOR_CANDIDATES = [
+        0x03007FFC,  # Standard SDK
+        0x03007E40,  # Emerald / Emerald hacks
+        0x03007640,  # Other titles
+    ]
+
     data_offs = []
-    pos = 0
-    while True:
-        pos = rom.find(IRQ_VEC, pos)
-        if pos < 0:
-            break
-        if pos % 4 == 0:
-            data_offs.append(pos)
-        pos += 4
+    for vec_addr in IRQ_VECTOR_CANDIDATES:
+        needle = struct.pack('<I', vec_addr)
+        pos = 0
+        while True:
+            pos = rom.find(needle, pos)
+            if pos < 0:
+                break
+            if pos % 4 == 0:
+                data_offs.append((pos, vec_addr))
+            pos += 4
 
     if not data_offs:
-        raise RuntimeError("0x03007FFC not found as a data word — ROM may already be patched or incompatible.")
+        raise RuntimeError(
+            "No known IRQ vector address found as a data word "
+            "(tried 0x03007FFC, 0x03007E40, 0x03007640) — "
+            "ROM may already be patched or uses an unknown IRQ vector address."
+        )
 
-    for data_off in data_offs:
+    for data_off, vec_addr in data_offs:
         # Scan Thumb instructions that could LDR from data_off
         # LDR r0,[pc,#imm8*4]: imm8 up to 255 words (1020 bytes) ahead of PC
         search_start = max(0, data_off - 1020)
@@ -210,24 +227,33 @@ def find_irq_hook(rom: bytes):
                 continue
             # Found!
             return_thumb_gba = GBA_ROM_BASE + str_off + 2 + 1  # next instr | 1 = Thumb
-            return (data_off, str_off, handler_reg, return_thumb_gba)
+            return (data_off, vec_addr, str_off, handler_reg, return_thumb_gba)
 
     raise RuntimeError(
-        "Could not find Thumb IRQ installer hook "
-        "(LDR r0,[pc,#N] where [N]=0x03007FFC followed by STR rH,[r0]).")
+        "Could not find Thumb IRQ installer hook — "
+        "searched for LDR r0,[pc,#N] (where [N] is 0x03007FFC / 0x03007E40 / 0x03007640) "
+        "followed by STR rH,[r0]. "
+        "ROM may use an unknown IRQ vector address."
+    )
 
 
 def is_already_patched(rom: bytes) -> bool:
     """
-    True if 0x03007FFC no longer appears as a data word in ROM
-    (it has been replaced by the stub address).
-    If it's gone AND payload bytes are present at ROM_SIZE-592, we're done.
+    True if none of the known IRQ vector addresses remain as data words
+    AND payload bytes are present at ROM_SIZE-592.
     """
-    irq_vec = struct.pack('<I', 0x03007FFC)
-    # Quick check: is 0x03007FFC still present?
-    if rom.find(irq_vec) >= 0:
-        return False
-    # Also check payload signature at expected location
+    IRQ_VECTOR_CANDIDATES = [0x03007FFC, 0x03007E40, 0x03007640]
+    for vec_addr in IRQ_VECTOR_CANDIDATES:
+        needle = struct.pack('<I', vec_addr)
+        pos = 0
+        while True:
+            pos = rom.find(needle, pos)
+            if pos < 0:
+                break
+            if pos % 4 == 0:
+                return False   # still present — not yet patched
+            pos += 4
+    # None found — check payload signature
     payload_off = len(rom) - INJECT_TOTAL
     if payload_off >= 0 and rom[payload_off:payload_off+8] == PATCH_BIN[:8]:
         return True
@@ -252,12 +278,12 @@ def patch_rom(rom: bytes, verbose: bool = False) -> bytes:
         return bytes(rom)
 
     # Find hook site
-    data_off, str_off, handler_reg, return_thumb_gba = find_irq_hook(rom)
+    data_off, vec_addr, str_off, handler_reg, return_thumb_gba = find_irq_hook(rom)
 
     if verbose:
-        print(f"  0x03007FFC data word at: 0x{data_off:06x}")
-        print(f"  STR r{handler_reg},[r0] at:      0x{str_off:05x}")
-        print(f"  Return Thumb addr:       0x{return_thumb_gba:08x}")
+        print(f"  IRQ vector (0x{vec_addr:08x}) at: 0x{data_off:06x}")
+        print(f"  STR r{handler_reg},[r0] at:         0x{str_off:05x}")
+        print(f"  Return Thumb addr:          0x{return_thumb_gba:08x}")
 
     # Injection layout: [payload_548][stub_40][pad_4] at ROM end (overwrite 0xFF padding)
     payload_off = rom_size - INJECT_TOTAL           # ROM_SIZE - 592
@@ -290,7 +316,7 @@ def patch_rom(rom: bytes, verbose: bool = False) -> bytes:
     struct.pack_into('<H', rom, str_off, 0x4700)
 
     if verbose:
-        print(f"  Data word @ 0x{data_off:06x}: 0x03007ffc -> 0x{stub_gba:08x}")
+        print(f"  Data word @ 0x{data_off:06x}: 0x{vec_addr:08x} -> 0x{stub_gba:08x}")
         print(f"  Instr @ 0x{str_off:05x}:  STR r{handler_reg},[r0] -> BX r0")
         print("  Patched an interrupt installer!")
 
